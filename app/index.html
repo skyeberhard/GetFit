@@ -232,6 +232,25 @@
   .weekplan-row{display:grid;grid-template-columns:70px 1fr;gap:10px;align-items:center;margin-bottom:8px;}
 
   textarea.digest{min-height:280px;font-size:12px;font-family:"SF Mono","Consolas",monospace;white-space:pre-wrap;}
+
+  .exercise-row{display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid var(--border);}
+  .exercise-row:last-child{border-bottom:none;}
+  .exercise-row .name{font-weight:600;font-size:13px;}
+  .exercise-row .meta{font-size:11px;color:var(--text-dim);}
+
+  .chart-svg{width:100%;height:auto;display:block;}
+  .chart-grid{stroke:var(--border);stroke-width:1;}
+  .chart-axis-label{font-size:8px;fill:var(--text-faint);}
+  .chart-area{fill:var(--accent);opacity:0.08;}
+  .chart-line{fill:none;stroke:var(--accent);stroke-width:2;stroke-linecap:round;stroke-linejoin:round;}
+  .chart-dot{fill:var(--accent);stroke:var(--bg-elevated);stroke-width:2;}
+  .chart-hit{fill:transparent;cursor:pointer;}
+  .chart-end-label{font-size:10px;fill:var(--text-dim);font-weight:600;}
+  .chart-readout{text-align:center;font-size:12px;color:var(--text-dim);margin-top:8px;min-height:18px;}
+
+  table.exercise-history-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px;}
+  .exercise-history-table th{text-align:left;color:var(--text-faint);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.05em;padding:5px 6px;border-bottom:1px solid var(--border);}
+  .exercise-history-table td{padding:7px 6px;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums;}
 </style>
 </head>
 <body>
@@ -280,6 +299,11 @@
       </div>
       <h2>Attributes</h2>
       <div id="attrList"></div>
+    </div>
+    <div class="panel">
+      <h2>Exercises</h2>
+      <div class="muted" style="margin-bottom:6px;">Tap an exercise to see its trend over time.</div>
+      <div id="exerciseList"><div class="empty">Log an exercise to see its trend here.</div></div>
     </div>
     <div class="panel">
       <h2>Session Log</h2>
@@ -680,6 +704,35 @@
     };
   }
 
+  /* ---------- per-exercise history (for the progress trend view) ---------- */
+  // Best set per session, chronological. Metric is inferred from the data
+  // itself (was any weight > 0 ever logged for this name) rather than a
+  // stored "loaded" flag, so it works for both template and custom
+  // exercises regardless of how they were entered.
+  function buildExerciseHistory(sessions, exerciseName) {
+    var points = [];
+    sessions.slice().sort(function (a, b) { return a.date.localeCompare(b.date); }).forEach(function (s) {
+      var ex = (s.exercises || []).filter(function (e) { return e.name === exerciseName; })[0];
+      if (!ex) return;
+      var filled = (ex.sets || []).filter(isSetFilled);
+      if (!filled.length) return;
+      var bestWeight = filled.reduce(function (m, set) { return (set.weight && set.weight > m) ? set.weight : m; }, 0);
+      var bestReps = filled.reduce(function (m, set) { return (set.reps && set.reps > m) ? set.reps : m; }, 0);
+      points.push({ date: s.date, bestWeight: bestWeight, bestReps: bestReps });
+    });
+    var everLoaded = points.some(function (p) { return p.bestWeight > 0; });
+    return { exerciseName: exerciseName, metric: everLoaded ? "weight" : "reps", points: points };
+  }
+
+  // Exercise names ever logged, most-recently-updated first.
+  function listLoggedExercises(state) {
+    var catalog = state.exercises || {};
+    return Object.keys(catalog)
+      .map(function (name) { return catalog[name]; })
+      .sort(function (a, b) { return (b.updatedAt || "").localeCompare(a.updatedAt || ""); })
+      .map(function (entry) { return entry.name; });
+  }
+
   /* ---------- schema / migration ---------- */
   function migrate(data) {
     if (!data || typeof data !== "object") return freshState();
@@ -958,7 +1011,9 @@
     updateExerciseInTemplate: updateExerciseInTemplate,
     buildTodayViewModel: buildTodayViewModel,
     buildExerciseViewModel: buildExerciseViewModel,
-    buildDigest: buildDigest
+    buildDigest: buildDigest,
+    buildExerciseHistory: buildExerciseHistory,
+    listLoggedExercises: listLoggedExercises
   };
 
   if (typeof module !== "undefined" && module.exports) {
@@ -1277,7 +1332,24 @@
         '<div class="attr-detail">' + esc(a.detail) + '</div></div>';
     }).join("");
 
+    renderExerciseList();
     renderSessionLog();
+  }
+
+  function renderExerciseList() {
+    var el = $("#exerciseList");
+    var names = L.listLoggedExercises(state);
+    if (!names.length) { el.innerHTML = '<div class="empty">Log an exercise to see its trend here.</div>'; return; }
+    el.innerHTML = names.map(function (name) {
+      var history = L.buildExerciseHistory(state.sessions, name);
+      var values = history.points.map(function (p) { return history.metric === "weight" ? p.bestWeight : p.bestReps; });
+      var best = values.length ? Math.max.apply(null, values) : 0;
+      var unit = history.metric === "weight" ? "lb" : "reps";
+      var sessionWord = history.points.length === 1 ? "session" : "sessions";
+      return '<div class="exercise-row" data-action="open-exercise-detail" data-exercise="' + esc(name) + '">' +
+        '<span class="name">' + esc(name) + '</span>' +
+        '<span class="meta">best ' + best + " " + unit + " · " + history.points.length + " " + sessionWord + '</span></div>';
+    }).join("");
   }
 
   function renderSessionLog() {
@@ -1350,6 +1422,8 @@
       case "open-digest": return openDigestModal();
       case "copy-digest": return copyDigest();
       case "download-digest": return downloadDigest();
+      case "open-exercise-detail": return openExerciseDetailModal(el.dataset.exercise);
+      case "chart-point-tap": return updateChartReadout(el);
       default: return;
     }
   }
@@ -1859,6 +1933,98 @@
     a.click();
     document.body.removeChild(a);
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  /* ---------- exercise history (progress trend) ---------- */
+  function openExerciseDetailModal(name) {
+    var history = L.buildExerciseHistory(state.sessions, name);
+    var unit = history.metric === "weight" ? "lb" : "reps";
+    var points = history.points.map(function (p) {
+      return { date: p.date, value: history.metric === "weight" ? p.bestWeight : p.bestReps };
+    });
+
+    var chartHtml = points.length
+      ? buildLineChartSvg(points, unit)
+      : '<div class="empty">No data yet.</div>';
+
+    var recent = points.slice().reverse().slice(0, 20);
+    var tableRows = recent.map(function (p) {
+      return "<tr><td>" + esc(p.date) + "</td><td>" + p.value + " " + esc(unit) + "</td></tr>";
+    }).join("");
+
+    var body =
+      '<div class="modal-grip"></div>' +
+      '<div class="modal-head"><h2>' + esc(name) + '</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
+      '<div class="muted" style="margin-bottom:10px;">' + (history.metric === "weight" ? "Best weight per session" : "Best reps per session") + '</div>' +
+      chartHtml +
+      (points.length ? '<div class="chart-readout" id="chartReadout">Tap a point to see its value.</div>' : "") +
+      (points.length ? '<table class="exercise-history-table"><thead><tr><th>Date</th><th>Best</th></tr></thead><tbody>' + tableRows + "</tbody></table>" : "") +
+      (points.length > 20 ? '<div class="faint" style="margin-top:6px;text-align:center;">Showing the most recent 20 sessions.</div>' : "");
+    openModal(body);
+  }
+
+  function updateChartReadout(el) {
+    var box = $("#chartReadout");
+    if (!box) return;
+    var date = el.dataset.date, value = el.dataset.value, unit = el.dataset.unit || "";
+    box.textContent = date + ": " + value + (unit ? " " + unit : "");
+  }
+
+  // Single-series line chart, hand-rolled SVG (no external chart library --
+  // keeps the app a single offline file). No legend needed: the modal
+  // header + subtitle already name what's plotted. Tap-to-read instead of
+  // hover (this is a phone-first app), backed by a full data table so
+  // every value is reachable without tapping at all.
+  function buildLineChartSvg(points, unit) {
+    var W = 300, H = 150;
+    var padL = 30, padR = 14, padT = 16, padB = 22;
+    var plotW = W - padL - padR, plotH = H - padT - padB;
+
+    var values = points.map(function (p) { return p.value; });
+    var minV = Math.min.apply(null, values);
+    var maxV = Math.max.apply(null, values);
+    if (minV === maxV) { minV -= 1; maxV += 1; }
+    var pad = (maxV - minV) * 0.15;
+    var domainMin = minV - pad, domainMax = maxV + pad;
+    var lastIdx = points.length - 1;
+
+    function xAt(i) { return lastIdx === 0 ? padL + plotW / 2 : padL + (plotW * i / lastIdx); }
+    function yAt(v) { return padT + plotH - ((v - domainMin) / (domainMax - domainMin)) * plotH; }
+
+    var linePath = points.map(function (p, i) {
+      return (i === 0 ? "M" : "L") + xAt(i).toFixed(1) + "," + yAt(p.value).toFixed(1);
+    }).join(" ");
+    var areaPath = linePath +
+      " L" + xAt(lastIdx).toFixed(1) + "," + (padT + plotH).toFixed(1) +
+      " L" + xAt(0).toFixed(1) + "," + (padT + plotH).toFixed(1) + " Z";
+
+    var gridVals = [domainMax, (domainMin + domainMax) / 2, domainMin];
+    var gridLines = gridVals.map(function (v) {
+      var yy = yAt(v).toFixed(1);
+      return '<line x1="' + padL + '" y1="' + yy + '" x2="' + (W - padR) + '" y2="' + yy + '" class="chart-grid"/>' +
+        '<text x="' + (padL - 6) + '" y="' + (Number(yy) + 3) + '" class="chart-axis-label" text-anchor="end">' + Math.round(v) + "</text>";
+    }).join("");
+
+    var markers = points.map(function (p, i) {
+      var cx = xAt(i).toFixed(1), cy = yAt(p.value).toFixed(1);
+      return '<circle cx="' + cx + '" cy="' + cy + '" r="4" class="chart-dot"></circle>' +
+        '<circle cx="' + cx + '" cy="' + cy + '" r="13" class="chart-hit" data-action="chart-point-tap" data-date="' + esc(p.date) + '" data-value="' + p.value + '" data-unit="' + esc(unit) + '"></circle>';
+    }).join("");
+
+    // Anchored to END at the plot's right edge (never past it) and sat above
+    // the last point rather than to its right -- the last point is always
+    // near the right boundary, so a right-growing label there gets clipped
+    // by the SVG's own viewport (root <svg> clips to its viewBox by default).
+    var endLabelY = Math.max(padT + 8, yAt(points[lastIdx].value) - 12);
+    var endLabel = '<text x="' + (W - padR) + '" y="' + endLabelY.toFixed(1) + '" text-anchor="end" class="chart-end-label">' + points[lastIdx].value + " " + esc(unit) + "</text>";
+    var firstDateLabel = '<text x="' + padL + '" y="' + (H - 6) + '" class="chart-axis-label">' + esc(points[0].date.slice(5)) + "</text>";
+    var lastDateLabel = '<text x="' + (W - padR) + '" y="' + (H - 6) + '" class="chart-axis-label" text-anchor="end">' + esc(points[lastIdx].date.slice(5)) + "</text>";
+
+    return '<svg viewBox="0 0 ' + W + " " + H + '" class="chart-svg" role="img" aria-label="' + esc(unit) + ' trend over time">' +
+      gridLines + '<path d="' + areaPath + '" class="chart-area"></path>' +
+      '<path d="' + linePath + '" class="chart-line"></path>' +
+      markers + endLabel + firstDateLabel + lastDateLabel +
+      "</svg>";
   }
 
   /* ---------- export / import ---------- */

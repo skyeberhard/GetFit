@@ -310,6 +310,35 @@ function main() {
   check("digest includes the streak snapshot", digest.indexOf("Current streak") !== -1);
   check("digest includes a PR section", digest.indexOf("PRs in the last 30 days") !== -1);
 
+  /* ---- exercise history (progress trend view) ---- */
+  const exHistSessions = [
+    { date: "2026-08-01", exercises: [{ name: "Goblet Squat", sets: [{ reps: 12, weight: 20 }, { reps: 12, weight: 20 }] }] },
+    { date: "2026-08-15", exercises: [{ name: "Goblet Squat", sets: [{ reps: 10, weight: 22 }, { reps: 12, weight: 30 }] }] },
+    { date: "2026-08-08", exercises: [{ name: "Goblet Squat", sets: [{ reps: 12, weight: 25 }] }] },
+    { date: "2026-08-02", exercises: [{ name: "Push-Up", sets: [{ reps: 12, weight: 0 }] }] },
+    { date: "2026-08-09", exercises: [{ name: "Push-Up", sets: [{ reps: 18, weight: null }] }] }
+  ];
+
+  const squatHistory = L.buildExerciseHistory(exHistSessions, "Goblet Squat");
+  check("buildExerciseHistory infers weight metric when any set has weight > 0", squatHistory.metric === "weight");
+  check("buildExerciseHistory sorts points chronologically regardless of session order", squatHistory.points.map((p) => p.date).join(",") === "2026-08-01,2026-08-08,2026-08-15");
+  check("buildExerciseHistory takes the best (max) weight set per session", squatHistory.points.map((p) => p.bestWeight).join(",") === "20,25,30");
+
+  const pushupHistory = L.buildExerciseHistory(exHistSessions, "Push-Up");
+  check("buildExerciseHistory infers reps metric when weight is never set", pushupHistory.metric === "reps");
+  check("buildExerciseHistory takes the best (max) reps set per session", pushupHistory.points.map((p) => p.bestReps).join(",") === "12,18");
+
+  const unknownHistory = L.buildExerciseHistory(exHistSessions, "Nonexistent Exercise");
+  check("buildExerciseHistory returns no points for an exercise never logged", unknownHistory.points.length === 0);
+
+  const catalogFixture = {
+    "Old One": { name: "Old One", lastReps: 10, lastWeight: 0, updatedAt: "2026-08-01T00:00:00.000Z" },
+    "Newest": { name: "Newest", lastReps: 10, lastWeight: 0, updatedAt: "2026-08-20T00:00:00.000Z" },
+    "Middle": { name: "Middle", lastReps: 10, lastWeight: 0, updatedAt: "2026-08-10T00:00:00.000Z" }
+  };
+  const loggedOrder = L.listLoggedExercises({ exercises: catalogFixture });
+  check("listLoggedExercises sorts most-recently-updated first", loggedOrder.join(",") === "Newest,Middle,Old One");
+
   /* ---- template editing (pure, immutable) ---- */
   const originalTemplate = L.WORKOUT_TEMPLATES.upperA;
   const withAdded = L.addExerciseToTemplate(originalTemplate, { name: "Face Pull", metric: "reps", loaded: true, targetSets: 3, targetReps: 15 });
