@@ -158,6 +158,15 @@ function main() {
   check("migration converts nested exercises/sets", migrated.sessions[0].exercises[0].sets.length === 2);
   check("migration maps entries.exercise -> exercises[].name", migrated.sessions[0].exercises[0].name === "Pull-Up");
   check("migration maps setLogs -> sets with numeric reps/weight", migrated.sessions[0].exercises[1].sets[0].weight === 25);
+  check("v0->v1->v2 chain seeds templates from defaults", migrated.templates && migrated.templates.upperA.exercises.length > 0);
+  check("v0->v1->v2 chain seeds longestStreak", migrated.longestStreak === 0);
+
+  // A v1 blob (has schemaVersion:1, no templates/longestStreak) should chain through v1->v2 only.
+  const v1Blob = { schemaVersion: 1, xp: 50, restDays: [0], weekPlan: Object.assign({}, L.DEFAULT_WEEK_PLAN), weekOverrides: {}, baselines: L.DEFAULT_BASELINES, exercises: {}, sessions: [], readiness: {} };
+  const fromV1 = L.migrate(v1Blob);
+  check("v1->v2 migration adds templates", !!fromV1.templates);
+  check("v1->v2 migration adds longestStreak", fromV1.longestStreak === 0);
+  check("v1->v2 migration preserves existing xp", fromV1.xp === 50);
 
   const alreadyCurrent = L.migrate(L.freshState());
   check("migrating already-current state is a no-op passthrough", alreadyCurrent.schemaVersion === L.SCHEMA_VERSION);
@@ -202,6 +211,107 @@ function main() {
   const squatVm = L.buildExerciseViewModel(squatDef, null, fixtureState.exercises);
   check("exercise view-model pulls suggestion from catalog history", squatVm.suggestion.weight > 30);
   check("exercise view-model pads sets to target count", squatVm.sets.length === squatDef.targetSets);
+
+  /* ---- day compliance / streak ---- */
+  function buildCompleteWorkoutSession(date, template) {
+    return {
+      id: date, date: date, dayLabel: template.label, type: "workout",
+      exercises: template.exercises.map(function (def) {
+        var sets = [];
+        for (var i = 0; i < def.targetSets; i++) sets.push({ reps: def.targetReps, weight: def.loaded ? 20 : 0, cadenceMs: null });
+        return { name: def.name, isCustom: false, metric: def.metric, sets: sets };
+      }),
+      cardio: null, xpEarned: 0, completedAt: date
+    };
+  }
+  function buildCardioSession(date, minutes) {
+    return {
+      id: date, date: date, dayLabel: "Cardio", type: "cardio", exercises: [],
+      cardio: { cardioType: "Bike", durationMin: minutes, distanceMi: null, hr: null, recoveryHr: null, temperatureF: null },
+      xpEarned: 0, completedAt: date
+    };
+  }
+
+  const streakState = L.freshState();
+  streakState.restDays = [0, 4]; // Sun, Thu
+  const templates = streakState.templates;
+
+  check("isDayCompliant: rest day is always compliant with no session", L.isDayCompliant(streakState, new Date("2026-09-24T09:00:00"))); // Thu, rest
+  check("isDayCompliant: training day with no session is not compliant", !L.isDayCompliant(streakState, new Date("2026-09-21T09:00:00"))); // Mon, upperA, no session yet
+
+  streakState.sessions.push(buildCompleteWorkoutSession("2026-09-21", templates.upperA)); // Mon
+  streakState.sessions.push(buildCardioSession("2026-09-22", 30));                        // Tue
+  streakState.sessions.push(buildCompleteWorkoutSession("2026-09-23", templates.lower));  // Wed
+  // Thu 24th is a rest day -> auto-compliant, no session needed.
+
+  const fridayMorning = new Date("2026-09-25T09:00:00"); // Fri, before logging today
+  const streakBeforeToday = L.computeStreakInfo(streakState, fridayMorning);
+  // Walking back from Thu: Thu(rest)/Wed/Tue/Mon are compliant, and the Sunday
+  // before Monday is also a rest day, so the run extends to 5 before hitting
+  // the prior Saturday (a cardio day with no logged session).
+  check("streak counts back through the preceding Sunday rest day", streakBeforeToday.current === 5);
+  check("streak: today not yet compliant is reflected", streakBeforeToday.todayCompliant === false);
+
+  streakState.sessions.push(buildCompleteWorkoutSession("2026-09-25", templates.upperB)); // Fri, completed
+  const streakAfterToday = L.computeStreakInfo(streakState, fridayMorning);
+  check("streak includes today once it's compliant", streakAfterToday.current === 6);
+  check("streak.longest tracks at least the current streak", streakAfterToday.longest >= 6);
+
+  const brokenStreakState = L.freshState();
+  brokenStreakState.restDays = [0, 4];
+  brokenStreakState.sessions.push(buildCompleteWorkoutSession("2026-09-21", brokenStreakState.templates.upperA)); // Mon, logged
+  // Tue and Wed intentionally skipped (training days, no session)
+  const brokenStreak = L.computeStreakInfo(brokenStreakState, new Date("2026-09-25T09:00:00"));
+  check("a gap on a training day breaks the streak", brokenStreak.throughYesterday < 4);
+
+  /* ---- consistency / PRs / attributes ---- */
+  const consistency = L.computeConsistency(streakState, fridayMorning, 30);
+  check("consistency is a percentage between 0 and 100", consistency >= 0 && consistency <= 100);
+
+  const prSessions = [
+    { date: "2026-08-01", exercises: [{ name: "Goblet Squat", sets: [{ weight: 20, reps: 12 }] }] },
+    { date: "2026-08-10", exercises: [{ name: "Goblet Squat", sets: [{ weight: 25, reps: 12 }] }] }, // PR
+    { date: "2026-08-15", exercises: [{ name: "Goblet Squat", sets: [{ weight: 22, reps: 12 }] }] }, // not a PR
+    { date: "2026-08-20", exercises: [{ name: "Goblet Squat", sets: [{ weight: 30, reps: 12 }] }] }  // PR
+  ];
+  // since = the day after the first entry, so that entry only establishes the
+  // baseline "best" (any first-ever weight trivially beats a best of 0) and
+  // isn't itself counted as a PR within the window.
+  const prs = L.countRecentPRs(prSessions, "2026-08-02");
+  check("countRecentPRs finds only the weight-increasing sessions within the window", prs.length === 2);
+  check("countRecentPRs records the correct PR weights", prs[0].weight === 25 && prs[1].weight === 30);
+  const prsWindowed = L.countRecentPRs(prSessions, "2026-08-11");
+  check("countRecentPRs respects the since-date window", prsWindowed.length === 1 && prsWindowed[0].weight === 30);
+
+  const attrs = L.computeAttributes(streakState, fridayMorning);
+  check("attributes include strength/endurance/consistency", attrs.strength && attrs.endurance && attrs.consistency);
+  check("strength score is capped at 99", attrs.strength.score <= 99);
+  check("endurance score reflects logged cardio minutes", attrs.endurance.score > 0);
+
+  /* ---- digest ---- */
+  const digest = L.buildDigest(streakState, fridayMorning);
+  check("digest is a non-empty string", typeof digest === "string" && digest.length > 100);
+  check("digest includes the streak snapshot", digest.indexOf("Current streak") !== -1);
+  check("digest includes a PR section", digest.indexOf("PRs in the last 30 days") !== -1);
+
+  /* ---- template editing (pure, immutable) ---- */
+  const originalTemplate = L.WORKOUT_TEMPLATES.upperA;
+  const withAdded = L.addExerciseToTemplate(originalTemplate, { name: "Face Pull", metric: "reps", loaded: true, targetSets: 3, targetReps: 15 });
+  check("addExerciseToTemplate appends without mutating the original", withAdded.exercises.length === originalTemplate.exercises.length + 1);
+  check("addExerciseToTemplate does not mutate the source template", originalTemplate.exercises.length === 5);
+
+  const withRemoved = L.removeExerciseFromTemplate(originalTemplate, 0);
+  check("removeExerciseFromTemplate removes the targeted index", withRemoved.exercises.length === originalTemplate.exercises.length - 1);
+  check("removeExerciseFromTemplate does not mutate the source template", originalTemplate.exercises.length === 5);
+
+  const movedDown = L.moveExerciseInTemplate(originalTemplate, 0, 1);
+  check("moveExerciseInTemplate swaps adjacent exercises", movedDown.exercises[1].name === originalTemplate.exercises[0].name);
+  const movedOutOfBounds = L.moveExerciseInTemplate(originalTemplate, 0, -1);
+  check("moveExerciseInTemplate is a no-op past the start", movedOutOfBounds.exercises[0].name === originalTemplate.exercises[0].name);
+
+  const patched = L.updateExerciseInTemplate(originalTemplate, 0, { targetSets: 6 });
+  check("updateExerciseInTemplate patches only the targeted field", patched.exercises[0].targetSets === 6 && patched.exercises[0].name === originalTemplate.exercises[0].name);
+  check("updateExerciseInTemplate does not mutate the source template", originalTemplate.exercises[0].targetSets === 4);
 
   /* ---- summary ---- */
   console.log("\n" + passes + " passed, " + failures + " failed.");

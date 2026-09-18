@@ -8,7 +8,7 @@ Built to fit a specific setup: home equipment (pull-up bar, dumbbells, bike, jum
 
 ## Status
 
-Core app is up: per-set logging with progression suggestions, readiness check-in, cardio logger, XP/leveling, this-week-only day swaps, and JSON export/import — all in `app/index.html`. See `docs/roadmap.md` for what's next (PWA installability, deload weeks, permanent plan reassignment).
+Core app is up in `app/index.html`: per-set logging with progression suggestions, readiness check-in, cardio logger, a streak + RPG-attribute gamification layer (Strength/Endurance/Consistency, derived from logged data), in-app editing of the weekly plan and workout templates, an AI check-in digest export, and JSON backup/restore. Clean/minimal visual theme with light and dark variants. See `docs/roadmap.md` for what's next (PWA installability, deload weeks) and what's been explicitly deferred as scope creep (reading/Scripture tracking).
 
 ## Structure
 
