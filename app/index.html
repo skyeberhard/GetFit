@@ -1,0 +1,1367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>TRAIN</title>
+<style>
+  :root{
+    --bg:#050b14;
+    --bg-panel:#0a1626;
+    --bg-panel-2:#0d1e33;
+    --cyan:#00e5ff;
+    --cyan-dim:#0891a8;
+    --cyan-glow:rgba(0,229,255,0.35);
+    --amber:#ffb300;
+    --amber-dim:#b37b00;
+    --red:#ff4d4d;
+    --green:#2bff9e;
+    --text:#d8f3ff;
+    --text-dim:#7b93a8;
+    --text-faint:#3f5468;
+    --border:rgba(0,229,255,0.22);
+    --border-strong:rgba(0,229,255,0.45);
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    min-height:100vh;
+    padding-bottom:76px;
+    -webkit-tap-highlight-color:transparent;
+    background:
+      radial-gradient(circle at 15% 0%, rgba(0,229,255,0.06), transparent 40%),
+      radial-gradient(circle at 85% 10%, rgba(255,179,0,0.05), transparent 35%),
+      var(--bg);
+  }
+  .mono{font-family:"SF Mono","Consolas","Menlo",monospace;}
+  h1,h2,h3{margin:0;font-family:"SF Mono","Consolas","Menlo",monospace;letter-spacing:0.06em;text-transform:uppercase;font-weight:700;}
+  button{font-family:inherit;}
+  ::selection{background:var(--cyan-glow);}
+
+  /* ===== layout shells ===== */
+  header.topbar{
+    position:sticky;top:0;z-index:20;
+    display:flex;align-items:center;justify-content:space-between;
+    padding:14px 16px;
+    background:linear-gradient(180deg, rgba(5,11,20,0.97), rgba(5,11,20,0.86));
+    border-bottom:1px solid var(--border);
+    backdrop-filter:blur(6px);
+  }
+  header.topbar .brand{display:flex;align-items:center;gap:10px;}
+  header.topbar .brand-dot{width:10px;height:10px;border-radius:2px;background:var(--cyan);box-shadow:0 0 10px var(--cyan);transform:rotate(45deg);}
+  header.topbar h1{font-size:15px;color:var(--cyan);text-shadow:0 0 10px var(--cyan-glow);}
+  #xpBadge{display:flex;align-items:center;gap:8px;cursor:pointer;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-panel);}
+  #xpBadge .lvl{font-size:11px;color:var(--amber);font-family:"SF Mono",monospace;}
+  #xpBadge .bar{width:64px;height:6px;border-radius:3px;background:#0c1826;overflow:hidden;border:1px solid var(--border);}
+  #xpBadge .bar-fill{height:100%;background:linear-gradient(90deg,var(--cyan-dim),var(--cyan));}
+
+  main{max-width:640px;margin:0 auto;padding:14px 14px 24px;}
+
+  nav.tabbar{
+    position:fixed;left:0;right:0;bottom:0;z-index:20;
+    display:flex;justify-content:space-around;
+    background:rgba(5,11,20,0.97);
+    border-top:1px solid var(--border);
+    padding:6px 4px calc(6px + env(safe-area-inset-bottom));
+    backdrop-filter:blur(6px);
+  }
+  nav.tabbar button{
+    background:none;border:none;color:var(--text-dim);
+    display:flex;flex-direction:column;align-items:center;gap:2px;
+    font-size:10px;letter-spacing:0.05em;text-transform:uppercase;
+    padding:6px 10px;min-width:64px;border-radius:8px;
+  }
+  nav.tabbar button svg{width:20px;height:20px;stroke:var(--text-dim);fill:none;stroke-width:1.8;}
+  nav.tabbar button.active{color:var(--cyan);}
+  nav.tabbar button.active svg{stroke:var(--cyan);filter:drop-shadow(0 0 4px var(--cyan-glow));}
+
+  .view{display:none;}
+  .view.active{display:block;animation:fadein .15s ease-out;}
+  @keyframes fadein{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:translateY(0);}}
+
+  /* ===== panels / cards ===== */
+  .panel{
+    background:linear-gradient(180deg,var(--bg-panel),var(--bg-panel-2));
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:14px;
+    margin-bottom:12px;
+    position:relative;
+  }
+  .panel::before{
+    content:"";position:absolute;top:0;left:14px;right:14px;height:1px;
+    background:linear-gradient(90deg,transparent,var(--border-strong),transparent);
+  }
+  .panel h2{font-size:12px;color:var(--text-dim);margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;}
+  .panel h2 .tag{font-size:10px;padding:2px 6px;border-radius:4px;border:1px solid var(--border);color:var(--cyan);}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+  .muted{color:var(--text-dim);font-size:12px;}
+  .faint{color:var(--text-faint);}
+
+  .pill{display:inline-block;padding:3px 8px;border-radius:20px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;font-family:"SF Mono",monospace;border:1px solid var(--border);}
+  .pill.push{color:var(--green);border-color:rgba(43,255,158,.4);background:rgba(43,255,158,.08);}
+  .pill.steady{color:var(--cyan);border-color:rgba(0,229,255,.4);background:rgba(0,229,255,.08);}
+  .pill.hold{color:var(--amber);border-color:rgba(255,179,0,.4);background:rgba(255,179,0,.08);}
+  .pill.recovery{color:var(--red);border-color:rgba(255,77,77,.4);background:rgba(255,77,77,.08);}
+  .pill.rest{color:var(--text-dim);}
+
+  button.btn{
+    background:var(--bg-panel-2);color:var(--text);border:1px solid var(--border);
+    border-radius:8px;padding:11px 14px;font-size:13px;min-height:44px;
+    letter-spacing:.03em;
+  }
+  button.btn:active{transform:translateY(1px);}
+  button.btn.primary{background:linear-gradient(180deg,var(--cyan-dim),#066a7d);border-color:var(--cyan);color:#04141a;font-weight:700;}
+  button.btn.amber{background:linear-gradient(180deg,var(--amber-dim),#8a5c00);border-color:var(--amber);color:#1a1000;font-weight:700;}
+  button.btn.ghost{background:transparent;}
+  button.btn.block{width:100%;}
+  button.btn.sm{padding:7px 10px;min-height:34px;font-size:12px;}
+  button.btn:disabled{opacity:.4;}
+  button.icon-btn{background:none;border:none;color:var(--text-dim);min-height:34px;min-width:34px;}
+
+  input[type=number],input[type=text],select,textarea{
+    background:#071119;border:1px solid var(--border);color:var(--text);
+    border-radius:7px;padding:9px 10px;font-size:15px;width:100%;min-height:42px;
+  }
+  input[type=range]{width:100%;}
+  label.field-label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);display:block;margin-bottom:4px;font-family:"SF Mono",monospace;}
+
+  /* ===== today view ===== */
+  .day-strip{display:flex;gap:6px;margin-bottom:12px;overflow-x:auto;padding-bottom:2px;}
+  .day-chip{
+    flex:0 0 auto;width:40px;height:48px;border-radius:8px;border:1px solid var(--border);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+    font-family:"SF Mono",monospace;font-size:10px;color:var(--text-dim);background:var(--bg-panel);
+  }
+  .day-chip .d{font-size:9px;text-transform:uppercase;}
+  .day-chip.today{border-color:var(--cyan);color:var(--cyan);box-shadow:0 0 10px var(--cyan-glow) inset;}
+  .day-chip.rest{color:var(--text-faint);}
+  .day-chip.done::after{content:"";width:5px;height:5px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green);margin-top:2px;}
+  .day-chip.swapped{border-style:dashed;border-color:var(--amber);}
+
+  .exercise-card{border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px;background:rgba(255,255,255,0.015);}
+  .exercise-card.complete{border-color:rgba(43,255,158,.45);}
+  .exercise-card h3{font-size:13px;color:var(--text);margin-bottom:2px;}
+  .exercise-card .target{font-size:11px;color:var(--text-dim);margin-bottom:10px;}
+  .set-row{display:grid;grid-template-columns:28px 1fr 1fr 60px 32px;gap:6px;align-items:center;margin-bottom:6px;}
+  .set-row .set-idx{font-family:"SF Mono",monospace;font-size:11px;color:var(--text-dim);text-align:center;}
+  .set-row input{text-align:center;padding:8px 4px;font-size:14px;}
+  .set-row .chk{
+    width:32px;height:32px;border-radius:7px;border:1px solid var(--border);
+    display:flex;align-items:center;justify-content:center;color:var(--text-faint);
+  }
+  .set-row .chk.on{background:rgba(43,255,158,.15);border-color:var(--green);color:var(--green);}
+  .set-row .cadence{font-family:"SF Mono",monospace;font-size:10px;color:var(--text-faint);grid-column:1 / -1;text-align:right;}
+  .set-row.timing input,.set-row.timing .chk{opacity:.55;}
+
+  .xp-toast{
+    position:fixed;left:50%;top:14px;transform:translateX(-50%) translateY(-20px);
+    background:var(--bg-panel);border:1px solid var(--amber);color:var(--amber);
+    padding:8px 16px;border-radius:20px;font-family:"SF Mono",monospace;font-size:12px;
+    box-shadow:0 0 16px rgba(255,179,0,.35);z-index:60;opacity:0;transition:all .25s ease;pointer-events:none;
+  }
+  .xp-toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+
+  /* ===== modal ===== */
+  .modal-backdrop{
+    display:none;position:fixed;inset:0;background:rgba(2,6,12,0.72);z-index:50;
+    align-items:flex-end;justify-content:center;
+  }
+  .modal-backdrop.open{display:flex;}
+  .modal{
+    width:100%;max-width:640px;background:var(--bg-panel);border:1px solid var(--border-strong);
+    border-bottom:none;border-radius:16px 16px 0 0;padding:18px 16px calc(18px + env(safe-area-inset-bottom));
+    max-height:88vh;overflow-y:auto;box-shadow:0 -10px 40px rgba(0,229,255,0.08);
+  }
+  .modal .modal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;}
+  .modal .modal-head h2{font-size:14px;color:var(--cyan);}
+  .modal-grip{width:36px;height:4px;background:var(--border);border-radius:2px;margin:0 auto 12px;}
+
+  .banner{border:1px solid var(--amber);background:rgba(255,179,0,.08);color:var(--amber);border-radius:8px;padding:10px 12px;font-size:12px;margin-bottom:12px;}
+  .banner.info{border-color:var(--cyan);background:rgba(0,229,255,.06);color:var(--cyan);}
+  .empty{text-align:center;color:var(--text-dim);font-size:13px;padding:24px 10px;}
+  .weekday-toggle{display:flex;gap:6px;flex-wrap:wrap;}
+  .weekday-toggle button{width:42px;height:42px;border-radius:8px;border:1px solid var(--border);background:var(--bg-panel-2);color:var(--text-dim);font-family:"SF Mono",monospace;font-size:11px;}
+  .weekday-toggle button.on{color:var(--bg);background:var(--cyan);border-color:var(--cyan);font-weight:700;}
+
+  .history-item{border-bottom:1px solid var(--border);padding:10px 0;}
+  .history-item:last-child{border-bottom:none;}
+  .history-item .row1{display:flex;justify-content:space-between;font-size:13px;}
+  .history-item .row2{font-size:11px;color:var(--text-dim);margin-top:2px;}
+
+  select.exercise-picker{margin-bottom:8px;}
+  .chev{transition:transform .15s ease;}
+  .chev.open{transform:rotate(180deg);}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-dot"></div>
+    <h1>TRAIN</h1>
+  </div>
+  <div id="xpBadge" data-action="open-xp">
+    <div>
+      <div class="lvl">LVL <span id="lvlNum">1</span></div>
+      <div class="bar"><div class="bar-fill" id="xpBarFill" style="width:0%"></div></div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <!-- ===== TODAY ===== -->
+  <section class="view active" id="view-today">
+    <div class="day-strip" id="dayStrip"></div>
+
+    <div class="panel" id="readinessPanel"></div>
+
+    <div id="todayContent"></div>
+  </section>
+
+  <!-- ===== HISTORY ===== -->
+  <section class="view" id="view-history">
+    <div class="panel">
+      <h2>Session Log</h2>
+      <div id="historyList"><div class="empty">No sessions logged yet.</div></div>
+    </div>
+  </section>
+
+  <!-- ===== SETTINGS ===== -->
+  <section class="view" id="view-settings">
+    <div class="panel">
+      <h2>Rest Days</h2>
+      <div class="muted" style="margin-bottom:10px;">Tap to toggle. At least one rest day is required.</div>
+      <div class="weekday-toggle" id="restDayToggle"></div>
+      <div id="restDayWarning"></div>
+    </div>
+    <div class="panel">
+      <h2>Readiness Baselines</h2>
+      <label class="field-label">Resting HR baseline (bpm)</label>
+      <input type="number" id="baseRHR" inputmode="numeric">
+      <div style="height:8px"></div>
+      <label class="field-label">Sleep score — good threshold</label>
+      <input type="number" id="baseSleepGood" inputmode="numeric">
+      <div style="height:8px"></div>
+      <label class="field-label">Sleep score — low threshold</label>
+      <input type="number" id="baseSleepLow" inputmode="numeric">
+      <div style="height:10px"></div>
+      <button class="btn primary block" data-action="save-baselines">Save Baselines</button>
+    </div>
+    <div class="panel">
+      <h2>Data</h2>
+      <div class="muted" style="margin-bottom:10px;">Export a full backup, or restore from one. Nothing leaves this device.</div>
+      <div class="row" style="gap:8px;">
+        <button class="btn block" data-action="export-data">Export JSON</button>
+        <button class="btn block" data-action="import-data">Import JSON</button>
+      </div>
+      <input type="file" id="importFile" accept="application/json" style="display:none;">
+    </div>
+    <div class="panel">
+      <h2>About</h2>
+      <div class="muted">Single-file PWA. All data stored locally in IndexedDB with a localStorage mirror. No account, no server, no network calls.</div>
+    </div>
+  </section>
+</main>
+
+<nav class="tabbar">
+  <button class="tab-btn active" data-view="today">
+    <svg viewBox="0 0 24 24"><path d="M4 21V9l8-6 8 6v12h-5v-7H9v7z"/></svg>
+    Today
+  </button>
+  <button class="tab-btn" data-view="history">
+    <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/><path d="M12 8v5l3 3"/></svg>
+    History
+  </button>
+  <button class="tab-btn" data-view="settings">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    Settings
+  </button>
+</nav>
+
+<div class="xp-toast" id="xpToast"></div>
+
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal" id="modalBody"></div>
+</div>
+
+<script id="train-logic">
+/* ============================================================
+   TrainLogic — pure business-logic + view-model functions.
+   No DOM, no IndexedDB. Dual-exported so scripts/test-harness.js
+   can exercise it directly in Node.
+   ============================================================ */
+(function (root) {
+  "use strict";
+
+  var SCHEMA_VERSION = 1;
+
+  var WEEKDAY_LABELS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+
+  /* ---------- default plan ---------- */
+  // 0=Sun ... 6=Sat. Training days reference a workout template id.
+  // Rest days are configurable in settings; this is only the *default*.
+  var DEFAULT_REST_DAYS = [0, 4]; // Sun, Thu
+
+  var WORKOUT_TEMPLATES = {
+    upperA: {
+      id: "upperA", label: "Upper Body — Push/Pull",
+      exercises: [
+        { name: "Pull-Up", metric: "reps", loaded: true, targetSets: 4, targetReps: 8 },
+        { name: "Push-Up", metric: "reps", loaded: true, targetSets: 4, targetReps: 15 },
+        { name: "Dumbbell Row", metric: "reps", loaded: true, targetSets: 3, targetReps: 10 },
+        { name: "Dumbbell Shoulder Press", metric: "reps", loaded: true, targetSets: 3, targetReps: 10 },
+        { name: "Plank", metric: "seconds", loaded: false, targetSets: 3, targetReps: 45 }
+      ]
+    },
+    lower: {
+      id: "lower", label: "Lower Body & Core",
+      exercises: [
+        { name: "Goblet Squat", metric: "reps", loaded: true, targetSets: 4, targetReps: 12 },
+        { name: "Reverse Lunge", metric: "reps", loaded: true, targetSets: 3, targetReps: 12 },
+        { name: "Dumbbell RDL", metric: "reps", loaded: true, targetSets: 3, targetReps: 10 },
+        { name: "Bicycle Crunch", metric: "reps", loaded: false, targetSets: 3, targetReps: 20 },
+        { name: "Glute Bridge", metric: "reps", loaded: false, targetSets: 3, targetReps: 15 }
+      ]
+    },
+    upperB: {
+      id: "upperB", label: "Upper Body — Accessory",
+      exercises: [
+        { name: "Pull-Up", metric: "reps", loaded: true, targetSets: 3, targetReps: 8 },
+        { name: "Dumbbell Curl", metric: "reps", loaded: true, targetSets: 3, targetReps: 12 },
+        { name: "Tricep Dip", metric: "reps", loaded: true, targetSets: 3, targetReps: 12 },
+        { name: "Dumbbell Press", metric: "reps", loaded: true, targetSets: 3, targetReps: 10 },
+        { name: "Plank", metric: "seconds", loaded: false, targetSets: 3, targetReps: 45 }
+      ]
+    },
+    cardio: {
+      id: "cardio", label: "Cardio", isCardio: true
+    }
+  };
+
+  // default weekly assignment: weekday index -> template id ("rest" placeholder handled via restDays)
+  var DEFAULT_WEEK_PLAN = {
+    0: "cardio",   // Sun (also default rest)
+    1: "upperA",   // Mon
+    2: "cardio",   // Tue
+    3: "lower",    // Wed
+    4: "cardio",   // Thu (also default rest)
+    5: "upperB",   // Fri
+    6: "cardio"    // Sat
+  };
+
+  var CARDIO_TYPES = ["Bike", "Jump Rope", "Other"];
+
+  /* ---------- date helpers ---------- */
+  function toDateKey(d) {
+    var y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, "0"), day = String(d.getDate()).padStart(2, "0");
+    return y + "-" + m + "-" + day;
+  }
+  function weekStartKey(d) {
+    var day = d.getDay();
+    var start = new Date(d);
+    start.setDate(d.getDate() - day);
+    return toDateKey(start);
+  }
+
+  /* ---------- plan resolution ---------- */
+  // Returns the effective template id for a given weekday, honoring
+  // a this-week-only swap if present in overrides[weekStartKey][weekday].
+  function resolvePlanDay(weekPlan, overrides, weekKey, weekday) {
+    var wk = overrides && overrides[weekKey];
+    if (wk && Object.prototype.hasOwnProperty.call(wk, weekday)) {
+      return wk[weekday];
+    }
+    return weekPlan[weekday];
+  }
+
+  function isRestDay(restDays, weekday) {
+    return restDays.indexOf(weekday) !== -1;
+  }
+
+  // Longest run of consecutive rest days on a circular 7-day week.
+  function longestConsecutiveRestRun(restDays) {
+    var flags = [0,1,2,3,4,5,6].map(function (d) { return restDays.indexOf(d) !== -1; });
+    if (flags.every(Boolean)) return 7;
+    var best = 0, cur = 0;
+    for (var i = 0; i < 14; i++) {
+      if (flags[i % 7]) { cur++; best = Math.max(best, cur); } else { cur = 0; }
+    }
+    return Math.min(best, 7);
+  }
+
+  function validateRestDays(restDays) {
+    var errors = [];
+    if (!restDays || restDays.length === 0) errors.push("At least one rest day is required.");
+    var run = longestConsecutiveRestRun(restDays || []);
+    var warning = run > 3 ? "Warning: " + run + " consecutive rest days in a row — momentum may suffer." : null;
+    return { valid: errors.length === 0, errors: errors, warning: warning, longestRun: run };
+  }
+
+  /* ---------- progression suggestion ---------- */
+  // lastPerf: {weight, reps, targetReps, loaded} | null
+  function suggestProgression(exerciseDef, lastPerf) {
+    if (!lastPerf) {
+      return { weight: exerciseDef.loaded ? 0 : 0, reps: exerciseDef.targetReps, note: "no history" };
+    }
+    var hitTarget = lastPerf.reps >= (lastPerf.targetReps || exerciseDef.targetReps);
+    if (exerciseDef.loaded) {
+      if (hitTarget) {
+        var bump = lastPerf.weight > 0 ? Math.max(2.5, Math.round(lastPerf.weight * 0.05 * 2) / 2) : 5;
+        return { weight: round2(lastPerf.weight + bump), reps: exerciseDef.targetReps, note: "progress +weight" };
+      }
+      return { weight: lastPerf.weight, reps: exerciseDef.targetReps, note: "repeat weight" };
+    } else {
+      if (hitTarget) {
+        return { weight: lastPerf.weight || 0, reps: lastPerf.reps + 1, note: "progress +rep" };
+      }
+      return { weight: lastPerf.weight || 0, reps: exerciseDef.targetReps, note: "repeat target" };
+    }
+  }
+  function round2(n) { return Math.round(n * 100) / 100; }
+
+  /* ---------- set completion ---------- */
+  function isSetFilled(set, metric) {
+    if (!set) return false;
+    var val = metric === "seconds" ? set.reps : set.reps;
+    return val !== null && val !== undefined && val !== "" && !isNaN(val) && Number(val) > 0;
+  }
+  function allSetsComplete(sets, targetSets, metric) {
+    if (!sets || sets.length < targetSets) return false;
+    for (var i = 0; i < targetSets; i++) {
+      if (!isSetFilled(sets[i], metric)) return false;
+    }
+    return true;
+  }
+
+  /* ---------- XP / leveling ---------- */
+  function xpForSet(set, exerciseDef) {
+    var base = 10;
+    var target = exerciseDef ? exerciseDef.targetReps : 0;
+    var bonus = (set && target && set.reps >= target) ? 5 : 0;
+    return base + bonus;
+  }
+  function xpForCardio(cardio) {
+    if (!cardio) return 0;
+    var duration = Number(cardio.durationMin) || 0;
+    return 20 + Math.round(Math.min(duration, 90) / 5) * 2;
+  }
+  var WORKOUT_COMPLETE_BONUS = 50;
+
+  // xp required to go from level N to N+1 (triangular growth)
+  function xpToNext(level) {
+    return 100 + (level - 1) * 50;
+  }
+  function levelForXp(totalXp) {
+    var level = 1, remaining = totalXp, need = xpToNext(level);
+    while (remaining >= need) {
+      remaining -= need;
+      level += 1;
+      need = xpToNext(level);
+    }
+    return { level: level, xpIntoLevel: remaining, xpForNext: need, pct: Math.min(100, Math.round((remaining / need) * 100)) };
+  }
+
+  /* ---------- readiness engine ---------- */
+  // baselines: {restingHR, sleepGood, sleepLow}
+  function computeReadinessScore(input, baselines) {
+    var score = 0;
+    var sleep = Number(input.sleepScore);
+    var rhr = Number(input.restingHR);
+    var soreness = Number(input.soreness);
+
+    if (sleep >= baselines.sleepGood + 15) score += 2;
+    else if (sleep >= baselines.sleepGood) score += 1;
+    else if (sleep < baselines.sleepLow) score -= 2;
+
+    if (rhr <= baselines.restingHR - 3) score += 2;
+    else if (rhr <= baselines.restingHR) score += 1;
+    else if (rhr >= baselines.restingHR + 10) score -= 2;
+    else if (rhr >= baselines.restingHR + 5) score -= 1;
+
+    var sorenessTable = { 1: 1, 2: 0, 3: -1, 4: -2, 5: -3 };
+    score += sorenessTable.hasOwnProperty(soreness) ? sorenessTable[soreness] : 0;
+
+    return score;
+  }
+  function computeReadinessVerdict(input, baselines) {
+    var score = computeReadinessScore(input, baselines);
+    var verdict;
+    if (score >= 3) verdict = "PUSH";
+    else if (score >= 0) verdict = "STEADY";
+    else if (score >= -3) verdict = "HOLD";
+    else verdict = "RECOVERY";
+    return { verdict: verdict, score: score };
+  }
+
+  var DEFAULT_BASELINES = { restingHR: 60, sleepGood: 70, sleepLow: 50 };
+
+  /* ---------- schema / migration ---------- */
+  // Normalizes any persisted blob to the current SCHEMA_VERSION shape.
+  // v0 (legacy / pre-rebuild) shape, reconstructed from design notes:
+  //   { sessions: [{date, dayLabel, entries:[{exercise, setLogs:[{reps,weight}]}]}], xp, level }
+  function migrate(data) {
+    if (!data || typeof data !== "object") {
+      return freshState();
+    }
+    var version = data.schemaVersion || 0;
+    if (version === SCHEMA_VERSION) return data;
+
+    var state = freshState();
+
+    if (version === 0) {
+      state.xp = Number(data.xp) || 0;
+      if (Array.isArray(data.sessions)) {
+        state.sessions = data.sessions.map(function (legacy, i) {
+          return {
+            id: i + 1,
+            date: legacy.date || toDateKey(new Date()),
+            dayLabel: legacy.dayLabel || "Workout",
+            type: "workout",
+            exercises: (legacy.entries || []).map(function (e) {
+              return {
+                name: e.exercise || "Unknown",
+                isCustom: false,
+                sets: (e.setLogs || []).map(function (s) {
+                  return { reps: Number(s.reps) || 0, weight: Number(s.weight) || 0, cadenceMs: null };
+                })
+              };
+            }),
+            cardio: null,
+            xpEarned: 0,
+            completedAt: legacy.date || null
+          };
+        });
+      }
+    }
+
+    state.schemaVersion = SCHEMA_VERSION;
+    return state;
+  }
+
+  function freshState() {
+    return {
+      schemaVersion: SCHEMA_VERSION,
+      xp: 0,
+      restDays: DEFAULT_REST_DAYS.slice(),
+      weekPlan: Object.assign({}, DEFAULT_WEEK_PLAN),
+      weekOverrides: {},
+      baselines: Object.assign({}, DEFAULT_BASELINES),
+      exercises: {},
+      sessions: [],
+      readiness: {}
+    };
+  }
+
+  /* ---------- view-model builders (pure; DOM layer consumes these) ---------- */
+  function buildTodayViewModel(state, now) {
+    now = now || new Date();
+    var weekday = now.getDay();
+    var weekKey = weekStartKey(now);
+    var dateKey = toDateKey(now);
+    var rest = isRestDay(state.restDays, weekday);
+    var templateId = resolvePlanDay(state.weekPlan, state.weekOverrides, weekKey, weekday);
+    var swapped = !!(state.weekOverrides[weekKey] && Object.prototype.hasOwnProperty.call(state.weekOverrides[weekKey], weekday));
+    var template = WORKOUT_TEMPLATES[templateId];
+
+    var todaySession = null;
+    for (var i = state.sessions.length - 1; i >= 0; i--) {
+      if (state.sessions[i].date === dateKey) { todaySession = state.sessions[i]; break; }
+    }
+
+    var readinessToday = state.readiness[dateKey] || null;
+
+    var strip = [];
+    for (var d = 0; d < 7; d++) {
+      var tid = resolvePlanDay(state.weekPlan, state.weekOverrides, weekKey, d);
+      var dRest = isRestDay(state.restDays, d);
+      var dDate = new Date(now);
+      dDate.setDate(now.getDate() - weekday + d);
+      var dKey = toDateKey(dDate);
+      var dSwapped = !!(state.weekOverrides[weekKey] && Object.prototype.hasOwnProperty.call(state.weekOverrides[weekKey], d));
+      var dDone = state.sessions.some(function (s) { return s.date === dKey && s.exercises && s.exercises.length; });
+      strip.push({
+        weekday: d, label: WEEKDAY_LABELS[d], isToday: d === weekday, isRest: dRest,
+        templateId: tid, templateLabel: dRest ? "Rest" : (WORKOUT_TEMPLATES[tid] ? WORKOUT_TEMPLATES[tid].label : tid),
+        swapped: dSwapped, done: dDone, dateKey: dKey
+      });
+    }
+
+    var restValidation = validateRestDays(state.restDays);
+
+    return {
+      dateKey: dateKey, weekKey: weekKey, weekday: weekday,
+      isRest: rest, templateId: templateId, template: template, swapped: swapped,
+      todaySession: todaySession, readinessToday: readinessToday,
+      dayStrip: strip, restValidation: restValidation
+    };
+  }
+
+  function buildExerciseViewModel(exerciseDef, session, exerciseCatalog) {
+    var existing = session && session.exercises ? session.exercises.find(function (e) { return e.name === exerciseDef.name; }) : null;
+    var sets = existing ? existing.sets.slice() : [];
+    while (sets.length < exerciseDef.targetSets) sets.push({ reps: null, weight: null, cadenceMs: null });
+
+    var catalogEntry = exerciseCatalog ? exerciseCatalog[exerciseDef.name] : null;
+    var lastPerf = catalogEntry ? { weight: catalogEntry.lastWeight, reps: catalogEntry.lastReps, targetReps: exerciseDef.targetReps } : null;
+    var suggestion = suggestProgression(exerciseDef, lastPerf);
+    var complete = allSetsComplete(sets, exerciseDef.targetSets, exerciseDef.metric);
+
+    return { def: exerciseDef, sets: sets, suggestion: suggestion, complete: complete };
+  }
+
+  var TrainLogic = {
+    SCHEMA_VERSION: SCHEMA_VERSION,
+    WEEKDAY_LABELS: WEEKDAY_LABELS,
+    DEFAULT_REST_DAYS: DEFAULT_REST_DAYS,
+    WORKOUT_TEMPLATES: WORKOUT_TEMPLATES,
+    DEFAULT_WEEK_PLAN: DEFAULT_WEEK_PLAN,
+    CARDIO_TYPES: CARDIO_TYPES,
+    DEFAULT_BASELINES: DEFAULT_BASELINES,
+    WORKOUT_COMPLETE_BONUS: WORKOUT_COMPLETE_BONUS,
+
+    toDateKey: toDateKey,
+    weekStartKey: weekStartKey,
+    resolvePlanDay: resolvePlanDay,
+    isRestDay: isRestDay,
+    longestConsecutiveRestRun: longestConsecutiveRestRun,
+    validateRestDays: validateRestDays,
+    suggestProgression: suggestProgression,
+    isSetFilled: isSetFilled,
+    allSetsComplete: allSetsComplete,
+    xpForSet: xpForSet,
+    xpForCardio: xpForCardio,
+    xpToNext: xpToNext,
+    levelForXp: levelForXp,
+    computeReadinessScore: computeReadinessScore,
+    computeReadinessVerdict: computeReadinessVerdict,
+    migrate: migrate,
+    freshState: freshState,
+    buildTodayViewModel: buildTodayViewModel,
+    buildExerciseViewModel: buildExerciseViewModel
+  };
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = TrainLogic;
+  } else {
+    root.TrainLogic = TrainLogic;
+  }
+})(typeof window !== "undefined" ? window : globalThis);
+</script>
+
+<script>
+/* ============================================================
+   Storage layer — IndexedDB primary, localStorage mirror.
+   ============================================================ */
+(function () {
+  "use strict";
+  var DB_NAME = "train-db";
+  var DB_VERSION = 1;
+  var LS_KEY = "train:v1";
+  var db = null;
+
+  function openDb() {
+    return new Promise(function (resolve, reject) {
+      var req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = function (e) {
+        var idb = e.target.result;
+        if (!idb.objectStoreNames.contains("state")) {
+          idb.createObjectStore("state", { keyPath: "key" });
+        }
+      };
+      req.onsuccess = function (e) { resolve(e.target.result); };
+      req.onerror = function () { reject(req.error); };
+    });
+  }
+
+  function idbGet(key) {
+    return openDb().then(function (idb) {
+      return new Promise(function (resolve, reject) {
+        var tx = idb.transaction("state", "readonly");
+        var r = tx.objectStore("state").get(key);
+        r.onsuccess = function () { resolve(r.result ? r.result.value : undefined); };
+        r.onerror = function () { reject(r.error); };
+      });
+    });
+  }
+
+  function idbSet(key, value) {
+    return openDb().then(function (idb) {
+      return new Promise(function (resolve, reject) {
+        var tx = idb.transaction("state", "readwrite");
+        tx.objectStore("state").put({ key: key, value: value });
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror = function () { reject(tx.error); };
+      });
+    });
+  }
+
+  var Store = {
+    state: null,
+
+    load: function () {
+      var self = this;
+      return idbGet("app")
+        .catch(function () { return undefined; })
+        .then(function (fromIdb) {
+          var raw = fromIdb;
+          if (!raw) {
+            try {
+              var lsRaw = localStorage.getItem(LS_KEY);
+              if (lsRaw) raw = JSON.parse(lsRaw);
+            } catch (e) { /* ignore corrupt mirror */ }
+          }
+          self.state = TrainLogic.migrate(raw);
+          return self.persist();
+        })
+        .then(function () { return self.state; });
+    },
+
+    persist: function () {
+      var self = this;
+      try { localStorage.setItem(LS_KEY, JSON.stringify(self.state)); } catch (e) { /* quota / private mode */ }
+      return idbSet("app", self.state).catch(function () { /* idb unavailable — localStorage mirror still holds */ });
+    },
+
+    save: function () { return this.persist(); }
+  };
+
+  window.Store = Store;
+})();
+</script>
+
+<script>
+/* ============================================================
+   App shell — DOM rendering + event delegation.
+   ============================================================ */
+(function () {
+  "use strict";
+  var L = window.TrainLogic;
+  var state = null;
+  var activeTimers = {}; // exerciseName+setIdx -> {startedAt}
+
+  function $(sel, root) { return (root || document).querySelector(sel); }
+  function $all(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
+
+  /* ---------- boot ---------- */
+  document.addEventListener("DOMContentLoaded", function () {
+    Store.load().then(function (s) {
+      state = s;
+      render();
+    });
+    wireGlobalEvents();
+  });
+
+  function persistAndRerender() {
+    Store.save();
+    render();
+  }
+
+  function render() {
+    renderXpBadge();
+    renderToday();
+    renderHistory();
+    renderSettings();
+  }
+
+  /* ---------- XP badge ---------- */
+  function renderXpBadge() {
+    var lvl = L.levelForXp(state.xp);
+    $("#lvlNum").textContent = lvl.level;
+    $("#xpBarFill").style.width = lvl.pct + "%";
+  }
+
+  function awardXp(amount, label) {
+    state.xp += amount;
+    var toast = $("#xpToast");
+    toast.textContent = "+" + amount + " XP" + (label ? " · " + label : "");
+    toast.classList.add("show");
+    clearTimeout(toast._t);
+    toast._t = setTimeout(function () { toast.classList.remove("show"); }, 1600);
+  }
+
+  /* ---------- TODAY view ---------- */
+  function renderToday() {
+    var vm = L.buildTodayViewModel(state, new Date());
+    renderDayStrip(vm);
+    renderReadinessPanel(vm);
+    renderTodayContent(vm);
+  }
+
+  function renderDayStrip(vm) {
+    var el = $("#dayStrip");
+    el.innerHTML = vm.dayStrip.map(function (d) {
+      var cls = ["day-chip"];
+      if (d.isToday) cls.push("today");
+      if (d.isRest) cls.push("rest");
+      if (d.done) cls.push("done");
+      if (d.swapped) cls.push("swapped");
+      return '<div class="' + cls.join(" ") + '" data-action="strip-day" data-weekday="' + d.weekday + '" title="' + esc(d.templateLabel) + '">' +
+        '<div class="d">' + d.label + '</div><div>' + (d.isRest ? "—" : "●") + "</div></div>";
+    }).join("");
+  }
+
+  function renderReadinessPanel(vm) {
+    var el = $("#readinessPanel");
+    if (vm.readinessToday) {
+      var v = vm.readinessToday.verdict;
+      el.innerHTML =
+        '<h2>Readiness <span class="pill ' + v.toLowerCase() + '">' + v + "</span></h2>" +
+        '<div class="row"><div class="muted">Sleep ' + vm.readinessToday.sleepScore + " · RHR " + vm.readinessToday.restingHR + " · Soreness " + vm.readinessToday.soreness + "/5</div>" +
+        '<button class="btn ghost sm" data-action="open-readiness">Re-check</button></div>';
+    } else {
+      el.innerHTML =
+        '<h2>Readiness</h2>' +
+        '<div class="muted" style="margin-bottom:10px;">Log this morning’s sleep, resting HR, and soreness to get today’s verdict.</div>' +
+        '<button class="btn primary block" data-action="open-readiness">Morning Check-In</button>';
+    }
+  }
+
+  function renderTodayContent(vm) {
+    var el = $("#todayContent");
+    var restWarning = "";
+    if (!vm.restValidation.valid) {
+      restWarning = '<div class="banner">' + esc(vm.restValidation.errors.join(" ")) + " Configure in Settings." + "</div>";
+    } else if (vm.restValidation.warning) {
+      restWarning = '<div class="banner">' + esc(vm.restValidation.warning) + "</div>";
+    }
+
+    if (vm.isRest) {
+      var cardioLogged = vm.todaySession && vm.todaySession.cardio;
+      el.innerHTML = restWarning +
+        '<div class="panel">' +
+        '<h2>Rest Day <span class="tag">' + (vm.swapped ? "SWAPPED" : "SCHEDULED") + '</span></h2>' +
+        '<div class="muted" style="margin-bottom:10px;">Recovery day. Garmin already has your steps/walks — log optional bike, jump rope, or other cardio here if you did any.</div>' +
+        '<button class="btn ghost block" data-action="toggle-rest-cardio">' + (cardioLogged ? "Edit Cardio Log" : "+ Add Cardio") + '</button>' +
+        '<div id="restCardioSlot" style="margin-top:10px;display:' + (cardioLogged ? "block" : "none") + ';"></div>' +
+        '<div style="margin-top:10px;"><button class="btn ghost sm" data-action="open-swap">Swap this day</button></div>' +
+        "</div>";
+      if (cardioLogged) renderCardioForm($("#restCardioSlot"), vm.todaySession.cardio);
+      else $("#restCardioSlot").innerHTML = "";
+      return;
+    }
+
+    if (vm.template.isCardio) {
+      el.innerHTML = restWarning +
+        '<div class="panel">' +
+        '<h2>' + esc(vm.template.label) + '<span class="tag">TODAY</span></h2>' +
+        '<div class="muted" style="margin-bottom:10px;">Structured cardio. Pick a type and log duration/effort — runs & walks already come in through Garmin.</div>' +
+        '<div id="cardioFormSlot"></div>' +
+        '<div style="margin-top:10px;"><button class="btn ghost sm" data-action="open-swap">Swap this day</button></div>' +
+        "</div>";
+      renderCardioForm($("#cardioFormSlot"), vm.todaySession && vm.todaySession.cardio);
+      return;
+    }
+
+    var exVms = vm.template.exercises.map(function (def) {
+      return L.buildExerciseViewModel(def, vm.todaySession, state.exercises);
+    });
+    var allDone = exVms.every(function (e) { return e.complete; });
+
+    var html = restWarning +
+      '<div class="panel">' +
+      '<h2>' + esc(vm.template.label) + '<span class="tag">' + (allDone ? "COMPLETE" : "TODAY") + '</span></h2>' +
+      '<div style="margin-bottom:4px;"><button class="btn ghost sm" data-action="open-swap">Swap this day</button> ' +
+      '<button class="btn ghost sm" data-action="open-custom-exercise">+ Custom Exercise</button></div>' +
+      "</div>";
+
+    html += exVms.map(function (evm) { return renderExerciseCard(evm); }).join("");
+
+    var customEx = (vm.todaySession && vm.todaySession.exercises || []).filter(function (e) { return e.isCustom; });
+    html += customEx.map(function (e) {
+      var def = { name: e.name, metric: e.metric || "reps", loaded: true, targetSets: e.sets.length || 1, targetReps: 0 };
+      var evm = { def: def, sets: e.sets, suggestion: { note: "custom" }, complete: L.allSetsComplete(e.sets, e.sets.length, def.metric) };
+      return renderExerciseCard(evm, true);
+    }).join("");
+
+    el.innerHTML = html;
+  }
+
+  function renderExerciseCard(evm, isCustom) {
+    var def = evm.def;
+    var unit = def.metric === "seconds" ? "sec" : "reps";
+    var targetLine = isCustom
+      ? esc(def.targetSets) + " sets logged"
+      : def.targetSets + " × " + def.targetReps + " " + unit + (def.loaded ? " · suggested " + evm.suggestion.reps + " " + unit + " @ " + evm.suggestion.weight + " lb (" + evm.suggestion.note + ")" : " · bodyweight");
+
+    var rows = evm.sets.map(function (set, i) {
+      var checked = L.isSetFilled(set, def.metric);
+      var cadence = set.cadenceMs ? '<div class="cadence">split: ' + (set.cadenceMs / 1000).toFixed(1) + "s</div>" : "";
+      var running = activeTimers[def.name + "-" + i];
+      return '<div class="set-row" data-exercise="' + esc(def.name) + '" data-set="' + i + '">' +
+        '<div class="set-idx">' + (i + 1) + "</div>" +
+        '<input type="number" inputmode="decimal" placeholder="' + unit + '" data-field="reps" value="' + (set.reps != null ? set.reps : "") + '">' +
+        (def.loaded ? '<input type="number" inputmode="decimal" placeholder="lb" data-field="weight" value="' + (set.weight != null ? set.weight : "") + '">' : '<div></div>') +
+        '<button class="btn sm ghost" data-action="cadence-toggle" style="font-size:10px;">' + (running ? "STOP" : "⏱") + "</button>" +
+        '<div class="chk ' + (checked ? "on" : "") + '" data-action="toggle-set">' + (checked ? "✓" : "") + "</div>" +
+        cadence +
+        "</div>";
+    }).join("");
+
+    return '<div class="exercise-card ' + (evm.complete ? "complete" : "") + '">' +
+      "<h3>" + esc(def.name) + (isCustom ? ' <span class="faint">custom</span>' : "") + "</h3>" +
+      '<div class="target">' + targetLine + "</div>" + rows + "</div>";
+  }
+
+  function renderCardioForm(container, existing) {
+    if (!container) return;
+    var c = existing || { cardioType: L.CARDIO_TYPES[0], durationMin: "", distanceMi: "", hr: "", recoveryHr: "", temperatureF: "" };
+    container.innerHTML =
+      '<label class="field-label">Type</label>' +
+      '<select id="cardioType">' + L.CARDIO_TYPES.map(function (t) { return '<option value="' + t + '"' + (t === c.cardioType ? " selected" : "") + ">" + t + "</option>"; }).join("") + "</select>" +
+      '<div style="height:8px"></div>' +
+      '<div class="row" style="gap:8px;align-items:flex-start;">' +
+      '<div style="flex:1"><label class="field-label">Duration (min)</label><input type="number" id="cardioDuration" value="' + esc(c.durationMin) + '"></div>' +
+      '<div style="flex:1"><label class="field-label">Distance (mi, optional)</label><input type="number" id="cardioDistance" value="' + esc(c.distanceMi) + '"></div>' +
+      "</div>" +
+      '<div style="height:8px"></div>' +
+      '<div class="row" style="gap:8px;align-items:flex-start;">' +
+      '<div style="flex:1"><label class="field-label">Avg HR (optional)</label><input type="number" id="cardioHr" value="' + esc(c.hr) + '"></div>' +
+      '<div style="flex:1"><label class="field-label">Recovery HR (optional)</label><input type="number" id="cardioRecoveryHr" value="' + esc(c.recoveryHr) + '"></div>' +
+      "</div>" +
+      '<div style="height:8px"></div>' +
+      '<label class="field-label">Temperature °F (optional)</label><input type="number" id="cardioTemp" value="' + esc(c.temperatureF) + '">' +
+      '<div style="height:10px"></div>' +
+      '<button class="btn primary block" data-action="save-cardio">' + (existing ? "Update Cardio Log" : "Log Cardio") + "</button>";
+  }
+
+  /* ---------- event delegation (no stopPropagation on modal wrappers) ---------- */
+  function wireGlobalEvents() {
+    document.addEventListener("click", function (e) {
+      var actionEl = e.target.closest("[data-action]");
+      if (!actionEl) return;
+      var action = actionEl.dataset.action;
+      handleAction(action, actionEl, e);
+    });
+
+    document.addEventListener("input", function (e) {
+      var row = e.target.closest(".set-row");
+      if (row) handleSetInput(row, e.target);
+    });
+
+    document.addEventListener("click", function (e) {
+      var tabBtn = e.target.closest(".tab-btn");
+      if (tabBtn) switchView(tabBtn.dataset.view);
+    });
+
+    // backdrop click-to-close: only when the click landed on the backdrop itself
+    $("#modalBackdrop").addEventListener("click", function (e) {
+      if (e.target === e.currentTarget) closeModal();
+    });
+  }
+
+  function switchView(name) {
+    $all(".view").forEach(function (v) { v.classList.remove("active"); });
+    $all(".tab-btn").forEach(function (b) { b.classList.remove("active"); });
+    $("#view-" + name).classList.add("active");
+    $('.tab-btn[data-view="' + name + '"]').classList.add("active");
+  }
+
+  function handleAction(action, el, evt) {
+    switch (action) {
+      case "open-readiness": return openReadinessModal();
+      case "open-xp": return openXpModal();
+      case "open-swap": return openSwapModal();
+      case "open-custom-exercise": return openCustomExerciseModal();
+      case "close-modal": return closeModal();
+      case "strip-day": return; // informational chip for now; swap handled via open-swap
+      case "toggle-rest-cardio": return toggleRestCardio();
+      case "save-cardio": return saveCardio();
+      case "toggle-set": return toggleSet(el);
+      case "cadence-toggle": return toggleCadence(el);
+      case "save-baselines": return saveBaselines();
+      case "export-data": return exportData();
+      case "import-data": return $("#importFile").click();
+      case "submit-readiness": return submitReadiness();
+      case "confirm-swap": return confirmSwap(el);
+      case "add-custom-exercise": return addCustomExercise();
+      default: return;
+    }
+  }
+
+  /* ---------- set logging ---------- */
+  function findOrCreateTodaySession(templateId, dayLabel) {
+    var dateKey = L.toDateKey(new Date());
+    var s = state.sessions.find(function (x) { return x.date === dateKey; });
+    if (!s) {
+      s = { id: Date.now(), date: dateKey, dayLabel: dayLabel, type: "workout", templateId: templateId, exercises: [], cardio: null, xpEarned: 0, completedAt: null };
+      state.sessions.push(s);
+    }
+    return s;
+  }
+
+  function handleSetInput(row, input) {
+    var exerciseName = row.dataset.exercise;
+    var setIdx = Number(row.dataset.set);
+    var field = input.dataset.field;
+    if (!field) return;
+
+    var vm = L.buildTodayViewModel(state, new Date());
+    var dayLabel = vm.isRest ? "Rest" : vm.template.label;
+    var session = findOrCreateTodaySession(vm.templateId, dayLabel);
+
+    var exEntry = session.exercises.find(function (e) { return e.name === exerciseName; });
+    if (!exEntry) {
+      var def = (vm.template.exercises || []).find(function (d) { return d.name === exerciseName; });
+      exEntry = { name: exerciseName, isCustom: !def, metric: def ? def.metric : "reps", sets: [] };
+      session.exercises.push(exEntry);
+    }
+    while (exEntry.sets.length <= setIdx) exEntry.sets.push({ reps: null, weight: null, cadenceMs: null });
+
+    var val = input.value === "" ? null : Number(input.value);
+    exEntry.sets[setIdx][field] = val;
+
+    debounce("set-" + exerciseName + "-" + setIdx, function () {
+      maybeAutoCompleteExercise(session, exerciseName);
+      updateExerciseCatalog(exerciseName, exEntry);
+      Store.save();
+    }, 400);
+  }
+
+  var debounceTimers = {};
+  function debounce(key, fn, ms) {
+    clearTimeout(debounceTimers[key]);
+    debounceTimers[key] = setTimeout(fn, ms);
+  }
+
+  function maybeAutoCompleteExercise(session, exerciseName) {
+    var vm = L.buildTodayViewModel(state, new Date());
+    var def = vm.template && vm.template.exercises ? vm.template.exercises.find(function (d) { return d.name === exerciseName; }) : null;
+    var exEntry = session.exercises.find(function (e) { return e.name === exerciseName; });
+    var targetSets = def ? def.targetSets : exEntry.sets.length;
+    var metric = def ? def.metric : "reps";
+    var wasComplete = exEntry._wasComplete;
+    var nowComplete = L.allSetsComplete(exEntry.sets, targetSets, metric);
+    if (nowComplete && !wasComplete) {
+      var xp = exEntry.sets.slice(0, targetSets).reduce(function (sum, s) { return sum + L.xpForSet(s, def); }, 0);
+      awardXp(xp, def ? def.name : exerciseName);
+      session.xpEarned = (session.xpEarned || 0) + xp;
+      checkWorkoutComplete(session, vm);
+    }
+    exEntry._wasComplete = nowComplete;
+    render();
+  }
+
+  function checkWorkoutComplete(session, vm) {
+    if (!vm.template || vm.template.isCardio) return;
+    var allDone = vm.template.exercises.every(function (def) {
+      var e = session.exercises.find(function (x) { return x.name === def.name; });
+      return e && L.allSetsComplete(e.sets, def.targetSets, def.metric);
+    });
+    if (allDone && !session._bonusAwarded) {
+      awardXp(L.WORKOUT_COMPLETE_BONUS, "Workout Complete");
+      session.xpEarned = (session.xpEarned || 0) + L.WORKOUT_COMPLETE_BONUS;
+      session._bonusAwarded = true;
+      session.completedAt = new Date().toISOString();
+    }
+  }
+
+  function updateExerciseCatalog(name, exEntry) {
+    var lastSet = exEntry.sets.filter(function (s) { return L.isSetFilled(s, exEntry.metric); }).slice(-1)[0];
+    if (!lastSet) return;
+    state.exercises[name] = {
+      name: name,
+      lastReps: lastSet.reps,
+      lastWeight: lastSet.weight || 0,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  function toggleSet(chkEl) {
+    var row = chkEl.closest(".set-row");
+    var repsInput = row.querySelector('input[data-field="reps"]');
+    if (!repsInput) return;
+    var currentlyFilled = repsInput.value !== "";
+    if (currentlyFilled) {
+      repsInput.value = "";
+      var weightInput = row.querySelector('input[data-field="weight"]');
+      if (weightInput) weightInput.value = "";
+    } else if (!repsInput.value) {
+      var def = row.dataset.exercise;
+      repsInput.value = repsInput.placeholder === "sec" ? "45" : "1";
+    }
+    repsInput.dispatchEvent(new Event("input", { bubbles: true }));
+    if (row.querySelector('input[data-field="weight"]')) {
+      row.querySelector('input[data-field="weight"]').dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  }
+
+  function toggleCadence(btn) {
+    var row = btn.closest(".set-row");
+    var key = row.dataset.exercise + "-" + row.dataset.set;
+    if (activeTimers[key]) {
+      var elapsed = Date.now() - activeTimers[key];
+      delete activeTimers[key];
+      var vm = L.buildTodayViewModel(state, new Date());
+      var session = findOrCreateTodaySession(vm.templateId, vm.isRest ? "Rest" : vm.template.label);
+      var exEntry = session.exercises.find(function (e) { return e.name === row.dataset.exercise; });
+      if (exEntry) {
+        var idx = Number(row.dataset.set);
+        while (exEntry.sets.length <= idx) exEntry.sets.push({ reps: null, weight: null, cadenceMs: null });
+        exEntry.sets[idx].cadenceMs = elapsed;
+        Store.save();
+      }
+      render();
+    } else {
+      activeTimers[key] = Date.now();
+      btn.textContent = "STOP";
+    }
+  }
+
+  /* ---------- cardio ---------- */
+  function toggleRestCardio() {
+    var slot = $("#restCardioSlot");
+    var showing = slot.style.display !== "none";
+    if (showing && slot.innerHTML) { slot.style.display = "none"; return; }
+    slot.style.display = "block";
+    renderCardioForm(slot, null);
+  }
+
+  function saveCardio() {
+    var vm = L.buildTodayViewModel(state, new Date());
+    var dayLabel = vm.isRest ? "Rest" : vm.template.label;
+    var session = findOrCreateTodaySession(vm.templateId, dayLabel);
+    var cardio = {
+      cardioType: $("#cardioType").value,
+      durationMin: Number($("#cardioDuration").value) || 0,
+      distanceMi: $("#cardioDistance").value ? Number($("#cardioDistance").value) : null,
+      hr: $("#cardioHr").value ? Number($("#cardioHr").value) : null,
+      recoveryHr: $("#cardioRecoveryHr").value ? Number($("#cardioRecoveryHr").value) : null,
+      temperatureF: $("#cardioTemp").value ? Number($("#cardioTemp").value) : null
+    };
+    var wasLogged = !!session.cardio;
+    session.cardio = cardio;
+    session.type = vm.isRest ? "rest-cardio" : "cardio";
+    if (!wasLogged) {
+      var xp = L.xpForCardio(cardio);
+      awardXp(xp, cardio.cardioType);
+      session.xpEarned = (session.xpEarned || 0) + xp;
+      session.completedAt = new Date().toISOString();
+    }
+    persistAndRerender();
+  }
+
+  /* ---------- readiness modal ---------- */
+  function openReadinessModal() {
+    var existing = state.readiness[L.toDateKey(new Date())];
+    var body =
+      '<div class="modal-grip"></div>' +
+      '<div class="modal-head"><h2>Morning Check-In</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
+      '<label class="field-label">Sleep score (0–100)</label>' +
+      '<input type="number" id="inSleep" value="' + (existing ? existing.sleepScore : "") + '">' +
+      '<div style="height:10px"></div>' +
+      '<label class="field-label">Resting HR (bpm)</label>' +
+      '<input type="number" id="inRhr" value="' + (existing ? existing.restingHR : "") + '">' +
+      '<div class="muted" style="margin-top:4px;">Check before coffee / driving — both spike RHR 15–20 bpm.</div>' +
+      '<div style="height:10px"></div>' +
+      '<label class="field-label">Soreness (1 none – 5 severe)</label>' +
+      '<input type="range" id="inSoreness" min="1" max="5" value="' + (existing ? existing.soreness : 2) + '" oninput="document.getElementById(\'sorenessVal\').textContent=this.value">' +
+      '<div class="muted" style="text-align:center;">Level <span id="sorenessVal">' + (existing ? existing.soreness : 2) + "</span></div>" +
+      '<div style="height:14px"></div>' +
+      '<button class="btn primary block" data-action="submit-readiness">Get Verdict</button>' +
+      '<div id="readinessResult" style="margin-top:12px;"></div>';
+    openModal(body);
+  }
+
+  function submitReadiness() {
+    var input = {
+      sleepScore: Number($("#inSleep").value) || 0,
+      restingHR: Number($("#inRhr").value) || 0,
+      soreness: Number($("#inSoreness").value) || 3
+    };
+    var result = L.computeReadinessVerdict(input, state.baselines);
+    var dateKey = L.toDateKey(new Date());
+    state.readiness[dateKey] = Object.assign({}, input, { verdict: result.verdict, score: result.score, checkedAt: new Date().toISOString() });
+    Store.save();
+    $("#readinessResult").innerHTML =
+      '<div class="row"><span class="pill ' + result.verdict.toLowerCase() + '">' + result.verdict + '</span>' +
+      '<button class="btn ghost sm" data-action="open-readiness">Re-check</button></div>';
+    renderReadinessPanel(L.buildTodayViewModel(state, new Date()));
+  }
+
+  /* ---------- XP modal ---------- */
+  function openXpModal() {
+    var lvl = L.levelForXp(state.xp);
+    var body =
+      '<div class="modal-grip"></div>' +
+      '<div class="modal-head"><h2>Progress</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
+      '<div class="row"><div class="mono" style="font-size:28px;color:var(--cyan);">LVL ' + lvl.level + "</div>" +
+      '<div class="muted">' + state.xp + " total XP</div></div>" +
+      '<div style="height:10px"></div>' +
+      '<div class="bar" style="height:10px;"><div class="bar-fill" style="width:' + lvl.pct + '%;height:100%;"></div></div>' +
+      '<div class="muted" style="margin-top:6px;">' + lvl.xpIntoLevel + " / " + lvl.xpForNext + " XP to level " + (lvl.level + 1) + "</div>";
+    openModal(body);
+  }
+
+  /* ---------- swap modal ---------- */
+  function openSwapModal() {
+    var vm = L.buildTodayViewModel(state, new Date());
+    var options = Object.keys(L.WORKOUT_TEMPLATES).map(function (id) {
+      return '<button class="btn block" style="margin-bottom:6px;" data-action="confirm-swap" data-template="' + id + '">' + L.WORKOUT_TEMPLATES[id].label + "</button>";
+    }).join("");
+    var body =
+      '<div class="modal-grip"></div>' +
+      '<div class="modal-head"><h2>Swap Today</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
+      '<div class="muted" style="margin-bottom:10px;">This-week only — your regular plan resumes next week.</div>' +
+      options;
+    openModal(body);
+  }
+
+  function confirmSwap(el) {
+    var vm = L.buildTodayViewModel(state, new Date());
+    var templateId = el.dataset.template;
+    if (!state.weekOverrides[vm.weekKey]) state.weekOverrides[vm.weekKey] = {};
+    state.weekOverrides[vm.weekKey][vm.weekday] = templateId;
+    Store.save();
+    closeModal();
+    renderToday();
+  }
+
+  /* ---------- custom exercise modal ---------- */
+  function openCustomExerciseModal() {
+    var known = Object.keys(state.exercises);
+    var body =
+      '<div class="modal-grip"></div>' +
+      '<div class="modal-head"><h2>Custom Exercise</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
+      (known.length ? '<label class="field-label">Quick-pick</label><select class="exercise-picker" id="customPick"><option value="">— new —</option>' +
+        known.map(function (n) { return "<option value=\"" + esc(n) + "\">" + esc(n) + "</option>"; }).join("") + "</select>" : "") +
+      '<label class="field-label">Name</label>' +
+      '<input type="text" id="customName">' +
+      '<div style="height:8px"></div>' +
+      '<label class="field-label">Sets</label>' +
+      '<input type="number" id="customSets" value="3">' +
+      '<div style="height:10px"></div>' +
+      '<button class="btn primary block" data-action="add-custom-exercise">Add to Today</button>';
+    openModal(body);
+    var pick = $("#customPick");
+    if (pick) {
+      pick.addEventListener("change", function () {
+        if (pick.value) {
+          $("#customName").value = pick.value;
+        }
+      });
+    }
+  }
+
+  function addCustomExercise() {
+    var name = $("#customName").value.trim();
+    var numSets = Math.max(1, Number($("#customSets").value) || 3);
+    if (!name) return;
+    var vm = L.buildTodayViewModel(state, new Date());
+    var dayLabel = vm.isRest ? "Rest" : (vm.template ? vm.template.label : "Workout");
+    var session = findOrCreateTodaySession(vm.templateId, dayLabel);
+    var existing = session.exercises.find(function (e) { return e.name === name; });
+    if (!existing) {
+      var sets = [];
+      for (var i = 0; i < numSets; i++) sets.push({ reps: null, weight: null, cadenceMs: null });
+      session.exercises.push({ name: name, isCustom: true, metric: "reps", sets: sets });
+    }
+    Store.save();
+    closeModal();
+    render();
+  }
+
+  /* ---------- modal plumbing ---------- */
+  function openModal(html) {
+    $("#modalBody").innerHTML = html;
+    $("#modalBackdrop").classList.add("open");
+  }
+  function closeModal() {
+    $("#modalBackdrop").classList.remove("open");
+    $("#modalBody").innerHTML = "";
+  }
+
+  /* ---------- history ---------- */
+  function renderHistory() {
+    var el = $("#historyList");
+    var sessions = state.sessions.slice().sort(function (a, b) { return b.date.localeCompare(a.date); });
+    if (!sessions.length) { el.innerHTML = '<div class="empty">No sessions logged yet.</div>'; return; }
+    el.innerHTML = sessions.map(function (s) {
+      var exCount = (s.exercises || []).length;
+      var setCount = (s.exercises || []).reduce(function (n, e) { return n + e.sets.filter(function (st) { return L.isSetFilled(st, e.metric); }).length; }, 0);
+      var parts = [];
+      if (exCount) parts.push(exCount + " exercises, " + setCount + " sets");
+      if (s.cardio) parts.push(s.cardio.cardioType + " " + s.cardio.durationMin + "min");
+      return '<div class="history-item"><div class="row1"><span>' + esc(s.dayLabel || s.date) + '</span><span class="mono">' + esc(s.date) + '</span></div>' +
+        '<div class="row2">' + esc(parts.join(" · ") || "no data") + " · +" + (s.xpEarned || 0) + " XP</div></div>";
+    }).join("");
+  }
+
+  /* ---------- settings ---------- */
+  function renderSettings() {
+    var toggleEl = $("#restDayToggle");
+    toggleEl.innerHTML = L.WEEKDAY_LABELS.map(function (label, i) {
+      var on = state.restDays.indexOf(i) !== -1;
+      return '<button class="' + (on ? "on" : "") + '" data-action="toggle-restday" data-day="' + i + '">' + label + "</button>";
+    }).join("");
+    toggleEl.querySelectorAll("button").forEach(function (btn) {
+      btn.addEventListener("click", function () { toggleRestDay(Number(btn.dataset.day)); });
+    });
+
+    var v = L.validateRestDays(state.restDays);
+    var warnEl = $("#restDayWarning");
+    warnEl.innerHTML = "";
+    if (!v.valid) warnEl.innerHTML = '<div class="banner" style="margin-top:10px;">' + esc(v.errors.join(" ")) + "</div>";
+    else if (v.warning) warnEl.innerHTML = '<div class="banner" style="margin-top:10px;">' + esc(v.warning) + "</div>";
+
+    $("#baseRHR").value = state.baselines.restingHR;
+    $("#baseSleepGood").value = state.baselines.sleepGood;
+    $("#baseSleepLow").value = state.baselines.sleepLow;
+  }
+
+  function toggleRestDay(day) {
+    var idx = state.restDays.indexOf(day);
+    var next = state.restDays.slice();
+    if (idx === -1) next.push(day); else next.splice(idx, 1);
+    if (next.length === 0) { renderSettings(); return; } // min-1 guard: no-op, current warning banner explains
+    state.restDays = next;
+    persistAndRerender();
+  }
+
+  function saveBaselines() {
+    state.baselines = {
+      restingHR: Number($("#baseRHR").value) || L.DEFAULT_BASELINES.restingHR,
+      sleepGood: Number($("#baseSleepGood").value) || L.DEFAULT_BASELINES.sleepGood,
+      sleepLow: Number($("#baseSleepLow").value) || L.DEFAULT_BASELINES.sleepLow
+    };
+    persistAndRerender();
+  }
+
+  /* ---------- export / import ---------- */
+  function exportData() {
+    var blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "train-export-" + L.toDateKey(new Date()) + ".json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    $("#importFile").addEventListener("change", function (e) {
+      var file = e.target.files[0];
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function () {
+        try {
+          var parsed = JSON.parse(reader.result);
+          state = L.migrate(parsed);
+          persistAndRerender();
+        } catch (err) {
+          alert("Could not read that file — not valid TRAIN export JSON.");
+        }
+      };
+      reader.readAsText(file);
+      e.target.value = "";
+    });
+  });
+})();
+</script>
+
+</body>
+</html>

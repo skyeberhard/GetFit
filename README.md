@@ -8,7 +8,7 @@ Built to fit a specific setup: home equipment (pull-up bar, dumbbells, bike, jum
 
 ## Status
 
-Scaffold stage — rebuilding after losing the previous working copy. This repo exists so the file, its history, and the design notes never get lost like that again.
+Core app is up: per-set logging with progression suggestions, readiness check-in, cardio logger, XP/leveling, this-week-only day swaps, and JSON export/import — all in `app/index.html`. See `docs/roadmap.md` for what's next (PWA installability, deload weeks, permanent plan reassignment).
 
 ## Structure
 
