@@ -268,6 +268,22 @@ function main() {
   const consistency = L.computeConsistency(streakState, fridayMorning, 30);
   check("consistency is a percentage between 0 and 100", consistency >= 0 && consistency <= 100);
 
+  // Regression: a fresh account with nothing ever logged must show 0%
+  // consistency -- rest days should not hand out free credit just for
+  // being scheduled as rest. (This was the actual bug: rest days used to
+  // count in the denominator, so an idle account showed ~29% "for free".)
+  const freshConsistencyState = L.freshState();
+  freshConsistencyState.restDays = [0, 4];
+  const freshConsistency = L.computeConsistency(freshConsistencyState, fridayMorning, 30);
+  check("consistency is 0% for a fresh account with nothing logged", freshConsistency === 0);
+
+  // Window ending Fri 25th, looking back 5 days: Thu(rest, skipped),
+  // Wed/Tue/Mon (all logged, scheduled), Sun(rest, skipped) -> 3 scheduled
+  // days, all compliant -> 100%, with the two rest days excluded entirely
+  // rather than diluting or inflating the score.
+  const perfectWindowConsistency = L.computeConsistency(streakState, fridayMorning, 5);
+  check("consistency only counts scheduled (non-rest) days in the denominator", perfectWindowConsistency === 100);
+
   const prSessions = [
     { date: "2026-08-01", exercises: [{ name: "Goblet Squat", sets: [{ weight: 20, reps: 12 }] }] },
     { date: "2026-08-10", exercises: [{ name: "Goblet Squat", sets: [{ weight: 25, reps: 12 }] }] }, // PR

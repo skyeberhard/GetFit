@@ -617,15 +617,21 @@
     return { current: current, throughYesterday: count, todayCompliant: todayCompliant, longest: longest };
   }
 
+  // Only scheduled (non-rest) days count toward the denominator -- a rest
+  // day is neither a hit nor a miss, so it shouldn't hand out free credit
+  // toward a stat whose whole point is measuring whether you showed up.
   function computeConsistency(state, now, windowDays) {
     windowDays = windowDays || 30;
-    var compliant = 0;
+    var scheduled = 0, compliant = 0;
     var cursor = addDays(now, -1);
     for (var i = 0; i < windowDays; i++) {
-      if (isDayCompliant(state, cursor)) compliant++;
+      if (!isRestDay(state.restDays, cursor.getDay())) {
+        scheduled++;
+        if (isDayCompliant(state, cursor)) compliant++;
+      }
       cursor = addDays(cursor, -1);
     }
-    return windowDays ? Math.round((compliant / windowDays) * 100) : 0;
+    return scheduled ? Math.round((compliant / scheduled) * 100) : 0;
   }
 
   /* ---------- PRs / attributes ---------- */
