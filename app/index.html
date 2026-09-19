@@ -140,15 +140,18 @@
   input[type=checkbox]{width:18px;height:18px;}
   label.field-label{font-size:11px;color:var(--text-dim);display:block;margin-bottom:5px;font-weight:600;}
 
-  .day-strip{display:flex;gap:6px;margin-bottom:12px;overflow-x:auto;padding-bottom:2px;}
+  .day-strip-row{display:flex;gap:8px;align-items:center;margin-bottom:12px;}
+  .day-strip{flex:1;min-width:0;display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;align-items:center;}
   .day-chip{
     flex:0 0 auto;width:42px;height:50px;border-radius:var(--radius-sm);border:1px solid var(--border);
     display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
     font-size:11px;color:var(--text-dim);background:var(--bg-elevated);
   }
+  .day-chip{cursor:pointer;}
   .day-chip .d{font-size:10px;font-weight:600;text-transform:uppercase;color:var(--text-faint);}
-  .day-chip.today{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset;color:var(--accent);}
-  .day-chip.today .d{color:var(--accent);}
+  .day-chip.viewing{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset;color:var(--accent);}
+  .day-chip.viewing .d{color:var(--accent);}
+  .day-chip.real-today:not(.viewing) .d{color:var(--text);text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:2px;}
   .day-chip.rest{color:var(--text-faint);}
   .day-chip .dot{width:5px;height:5px;border-radius:50%;background:transparent;}
   .day-chip.done .dot{background:var(--accent);}
@@ -206,6 +209,14 @@
   .suggestion-item:first-child{border-top:1px solid var(--border);border-radius:var(--radius-sm) var(--radius-sm) 0 0;}
   .suggestion-item:last-child{border-radius:0 0 var(--radius-sm) var(--radius-sm);}
   .suggestion-item:active{background:var(--accent-soft);}
+
+  /* filter-select: a typeable, filterable stand-in for <select> used
+     everywhere a fixed choice is made -- see wireFselect() */
+  .fselect{position:relative;}
+  .fselect-list{position:absolute;left:0;right:0;top:calc(100% + 2px);z-index:8;display:none;max-height:220px;overflow-y:auto;box-shadow:var(--shadow-md);border-radius:var(--radius-sm);}
+  .fselect-list.open{display:block;}
+  .fselect-list .suggestion-item{border:1px solid var(--border);border-top:none;}
+  .fselect-list .suggestion-item:first-child{border-top:1px solid var(--border);}
 
   /* attribute bars */
   .attr-row{margin-bottom:12px;}
@@ -274,7 +285,10 @@
 <main>
   <!-- ===== TODAY ===== -->
   <section class="view active" id="view-today">
-    <div class="day-strip" id="dayStrip"></div>
+    <div class="day-strip-row">
+      <div class="day-strip" id="dayStrip"></div>
+      <button class="btn ghost sm" id="jumpToTodayBtn" data-action="jump-to-today" style="display:none;flex-shrink:0;">Today</button>
+    </div>
     <div class="panel" id="readinessPanel"></div>
     <div id="todayContent"></div>
   </section>
@@ -332,7 +346,7 @@
     <div class="panel">
       <h2>Workout Templates</h2>
       <div class="muted" style="margin-bottom:10px;">Edit the exercises, sets, and targets for each workout day.</div>
-      <select id="templatePicker" style="margin-bottom:12px;"></select>
+      <div id="templatePickerWrap" style="margin-bottom:12px;"></div>
       <div id="templateEditor"></div>
       <button class="btn ghost sm" data-action="plan-add-exercise" style="margin-top:4px;">+ Add Exercise</button>
     </div>
@@ -452,7 +466,11 @@
     6: "cardio"    // Sat
   };
 
-  var CARDIO_TYPES = ["Bike", "Jump Rope", "Other"];
+  // Run/Swim included despite Garmin already tracking runs -- this logger's
+  // job is feeding TRAIN's own streak/XP/history, not replacing Garmin's
+  // pace/route detail, so excluding a real Saturday activity just to avoid
+  // "duplicating" Garmin was the wrong call.
+  var CARDIO_TYPES = ["Run", "Bike", "Swim", "Jump Rope", "Other"];
   var TRAINING_TEMPLATE_IDS = ["upperA", "lower", "upperB", "cardio"];
 
   /* ---------- date helpers ---------- */
@@ -1156,10 +1174,95 @@
   var state = null;
   var activeTimers = {};
   var planEditorTemplateId = "upperA";
+  // The date the Today tab is currently showing/editing. Defaults to real
+  // today and resets to it on every page load (never persisted) -- but you
+  // can tap another day in this week's strip to view and log against it.
+  var viewDate = new Date();
+  function isRealToday(dateKey) { return dateKey === L.toDateKey(new Date()); }
 
   function $(sel, root) { return (root || document).querySelector(sel); }
   function $all(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
   function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
+
+  /* ---------- filter-select: a typeable stand-in for every fixed-choice
+     <select> in the app. Tapping in shows every option immediately (same
+     tap count as a native select); typing filters them. Value and display
+     label are tracked separately since several selects show a human label
+     for an internal id (e.g. workout template names vs. their ids). ---- */
+  var METRIC_OPTIONS = [{ value: "reps", label: "reps" }, { value: "seconds", label: "seconds" }];
+  var fselectRegistry = {};  // id -> options array, for lookups from delegated handlers
+  var fselectCallbacks = {}; // id -> function(value) to run side effects on pick
+
+  function renderFselect(id, options, currentValue) {
+    var current = options.filter(function (o) { return o.value === currentValue; })[0] || options[0];
+    return '<div class="fselect">' +
+      '<input type="text" class="fselect-input" id="' + id + '" data-value="' + esc(current ? current.value : "") + '" autocomplete="off" value="' + esc(current ? current.label : "") + '">' +
+      '<div class="fselect-list" id="' + id + '-list"></div>' +
+      "</div>";
+  }
+
+  function renderFselectOptions(id, options, query) {
+    var list = $("#" + id + "-list");
+    if (!list) return;
+    var q = (query || "").trim().toLowerCase();
+    var matches = q ? options.filter(function (o) { return o.label.toLowerCase().indexOf(q) !== -1; }) : options;
+    if (!matches.length) { list.innerHTML = ""; list.classList.remove("open"); return; }
+    list.classList.add("open");
+    list.innerHTML = matches.map(function (o) {
+      return '<div class="suggestion-item" data-action="fselect-pick" data-fselect="' + id + '" data-value="' + esc(o.value) + '">' +
+        "<span>" + esc(o.label) + "</span>" + (o.meta ? '<span class="faint">' + esc(o.meta) + "</span>" : "") + "</div>";
+    }).join("");
+  }
+
+  function wireFselect(id, options, onPick) {
+    fselectRegistry[id] = options;
+    fselectCallbacks[id] = onPick;
+    var input = $("#" + id);
+    if (!input) return;
+    input.addEventListener("focus", function () { renderFselectOptions(id, options, ""); });
+    input.addEventListener("input", function () { renderFselectOptions(id, options, input.value); });
+    input.addEventListener("blur", function () {
+      // Delay so a tap on a suggestion (which also blurs the input) registers first.
+      setTimeout(function () {
+        var list = $("#" + id + "-list");
+        if (list) { list.innerHTML = ""; list.classList.remove("open"); }
+        var typedMatch = options.filter(function (o) { return o.label === input.value; })[0];
+        if (!typedMatch) {
+          var current = options.filter(function (o) { return o.value === input.dataset.value; })[0] || options[0];
+          input.value = current ? current.label : "";
+          input.dataset.value = current ? current.value : "";
+        }
+      }, 180);
+    });
+  }
+
+  function pickFselectOption(el) {
+    var id = el.dataset.fselect;
+    var value = el.dataset.value;
+    var input = $("#" + id);
+    var options = fselectRegistry[id] || [];
+    var match = options.filter(function (o) { return o.value === value; })[0];
+    if (!input) return;
+    input.value = match ? match.label : value;
+    input.dataset.value = value;
+    var list = $("#" + id + "-list");
+    if (list) { list.innerHTML = ""; list.classList.remove("open"); }
+    var cb = fselectCallbacks[id];
+    if (cb) cb(value);
+  }
+
+  function fselectValue(id) {
+    var input = $("#" + id);
+    return input ? input.dataset.value : "";
+  }
+
+  function setFselectValue(id, value, options) {
+    var input = $("#" + id);
+    if (!input) return;
+    var match = options.filter(function (o) { return o.value === value; })[0];
+    input.value = match ? match.label : value;
+    input.dataset.value = value;
+  }
 
   document.addEventListener("DOMContentLoaded", function () {
     Store.load().then(function (s) {
@@ -1206,7 +1309,7 @@
 
   /* ---------- TODAY view ---------- */
   function renderToday() {
-    var vm = L.buildTodayViewModel(state, new Date());
+    var vm = L.buildTodayViewModel(state, viewDate);
     renderDayStrip(vm);
     renderReadinessPanel(vm);
     renderTodayContent(vm);
@@ -1216,29 +1319,47 @@
     var el = $("#dayStrip");
     el.innerHTML = vm.dayStrip.map(function (d) {
       var cls = ["day-chip"];
-      if (d.isToday) cls.push("today");
+      if (d.isToday) cls.push("viewing"); // "isToday" here means "the day currently being viewed", see buildTodayViewModel
+      if (isRealToday(d.dateKey)) cls.push("real-today");
       if (d.isRest) cls.push("rest");
       if (d.done) cls.push("done");
       if (d.swapped) cls.push("swapped");
-      return '<div class="' + cls.join(" ") + '" data-action="strip-day" data-weekday="' + d.weekday + '" title="' + esc(d.templateLabel) + '">' +
+      return '<div class="' + cls.join(" ") + '" data-action="strip-day" data-date="' + d.dateKey + '" title="' + esc(d.templateLabel) + '">' +
         '<div class="d">' + d.label + '</div><div class="dot"></div></div>';
     }).join("");
+    $("#jumpToTodayBtn").style.display = isRealToday(vm.dateKey) ? "none" : "block";
   }
 
   function renderReadinessPanel(vm) {
     var el = $("#readinessPanel");
+    var dateLabel = isRealToday(vm.dateKey) ? "" : " — " + formatDateLabel(vm.dateKey);
     if (vm.readinessToday) {
       var v = vm.readinessToday.verdict;
       el.innerHTML =
-        '<h2>Readiness <span class="pill ' + v.toLowerCase() + '">' + v + "</span></h2>" +
+        '<h2>Readiness' + esc(dateLabel) + ' <span class="pill ' + v.toLowerCase() + '">' + v + "</span></h2>" +
         '<div class="row"><div class="muted">Sleep ' + vm.readinessToday.sleepScore + " · RHR " + vm.readinessToday.restingHR + " · Soreness " + vm.readinessToday.soreness + "/5</div>" +
         '<button class="btn ghost sm" data-action="open-readiness">Re-check</button></div>';
     } else {
       el.innerHTML =
-        '<h2>Readiness</h2>' +
-        '<div class="muted" style="margin-bottom:10px;">Log this morning’s sleep, resting HR, and soreness to get today’s verdict.</div>' +
-        '<button class="btn primary block" data-action="open-readiness">Morning Check-In</button>';
+        '<h2>Readiness' + esc(dateLabel) + '</h2>' +
+        '<div class="muted" style="margin-bottom:10px;">Log ' + (isRealToday(vm.dateKey) ? "this morning’s" : "that day’s") + ' sleep, resting HR, and soreness to get its verdict.</div>' +
+        '<button class="btn primary block" data-action="open-readiness">' + (isRealToday(vm.dateKey) ? "Morning Check-In" : "Log Readiness") + '</button>';
     }
+  }
+
+  function formatDateLabel(dateKey) {
+    var d = new Date(dateKey + "T00:00:00");
+    return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  }
+
+  // Switches the Today tab to view/log against a different date. Scoped to
+  // the current week's strip -- dateKey always lands within the same
+  // calendar week viewDate is already showing, so the strip itself never
+  // shifts out from under you.
+  function viewDay(dateKey) {
+    if (!dateKey) return;
+    viewDate = new Date(dateKey + "T00:00:00");
+    renderToday();
   }
 
   function renderTodayContent(vm) {
@@ -1336,9 +1457,10 @@
   function renderCardioForm(container, existing) {
     if (!container) return;
     var c = existing || { cardioType: L.CARDIO_TYPES[0], durationMin: "", distanceMi: "", hr: "", recoveryHr: "", temperatureF: "" };
+    var cardioTypeOptions = L.CARDIO_TYPES.map(function (t) { return { value: t, label: t }; });
     container.innerHTML =
       '<label class="field-label">Type</label>' +
-      '<select id="cardioType">' + L.CARDIO_TYPES.map(function (t) { return '<option value="' + t + '"' + (t === c.cardioType ? " selected" : "") + ">" + t + "</option>"; }).join("") + "</select>" +
+      renderFselect("cardioType", cardioTypeOptions, c.cardioType) +
       '<div style="height:8px"></div>' +
       '<div class="row" style="gap:8px;align-items:flex-start;">' +
       '<div style="flex:1"><label class="field-label">Duration (min)</label><input type="number" id="cardioDuration" value="' + esc(c.durationMin) + '"></div>' +
@@ -1353,6 +1475,7 @@
       '<label class="field-label">Temperature °F (optional)</label><input type="number" id="cardioTemp" value="' + esc(c.temperatureF) + '">' +
       '<div style="height:10px"></div>' +
       '<button class="btn primary block" data-action="save-cardio">' + (existing ? "Update Cardio Log" : "Log Cardio") + "</button>";
+    wireFselect("cardioType", cardioTypeOptions, function () {});
   }
 
   /* ---------- PROGRESS view ---------- */
@@ -1453,7 +1576,8 @@
       case "open-swap": return openSwapModal();
       case "open-custom-exercise": return openCustomExerciseModal();
       case "close-modal": return closeModal();
-      case "strip-day": return;
+      case "strip-day": return viewDay(el.dataset.date);
+      case "jump-to-today": return viewDay(L.toDateKey(new Date()));
       case "toggle-rest-cardio": return toggleRestCardio();
       case "save-cardio": return saveCardio();
       case "toggle-set": return toggleSet(el);
@@ -1465,6 +1589,7 @@
       case "confirm-swap": return confirmSwap(el);
       case "add-custom-exercise": return addCustomExercise();
       case "pick-custom-suggestion": return pickCustomSuggestion(el);
+      case "fselect-pick": return pickFselectOption(el);
       case "plan-add-exercise": return planAddExercise();
       case "plan-remove-exercise": return planRemoveExercise(el);
       case "plan-move-exercise": return planMoveExercise(el);
@@ -1478,8 +1603,8 @@
   }
 
   /* ---------- set logging ---------- */
-  function findOrCreateTodaySession(templateId, dayLabel) {
-    var dateKey = L.toDateKey(new Date());
+  function findOrCreateSessionForViewedDate(templateId, dayLabel) {
+    var dateKey = L.toDateKey(viewDate);
     var s = state.sessions.find(function (x) { return x.date === dateKey; });
     if (!s) {
       s = { id: Date.now(), date: dateKey, dayLabel: dayLabel, type: "workout", templateId: templateId, exercises: [], cardio: null, xpEarned: 0, completedAt: null };
@@ -1494,9 +1619,9 @@
     var field = input.dataset.field;
     if (!field) return;
 
-    var vm = L.buildTodayViewModel(state, new Date());
+    var vm = L.buildTodayViewModel(state, viewDate);
     var dayLabel = vm.isRest ? "Rest" : vm.template.label;
-    var session = findOrCreateTodaySession(vm.templateId, dayLabel);
+    var session = findOrCreateSessionForViewedDate(vm.templateId, dayLabel);
 
     var exEntry = session.exercises.find(function (e) { return e.name === exerciseName; });
     if (!exEntry) {
@@ -1522,13 +1647,19 @@
   }
 
   function maybeAutoCompleteExercise(session, exerciseName) {
-    var vm = L.buildTodayViewModel(state, new Date());
+    // Runs after a debounce, so re-derive the day from the session itself
+    // (not the outer viewDate) -- viewDate may have moved on to a different
+    // day by the time this fires.
+    var vm = L.buildTodayViewModel(state, new Date(session.date + "T00:00:00"));
     var def = vm.template && vm.template.exercises ? vm.template.exercises.find(function (d) { return d.name === exerciseName; }) : null;
     var exEntry = session.exercises.find(function (e) { return e.name === exerciseName; });
     var targetSets = def ? def.targetSets : exEntry.sets.length;
     var wasComplete = exEntry._wasComplete;
     var nowComplete = L.allSetsComplete(exEntry.sets, targetSets);
 
+    // Streak bonus is evaluated against the real live streak (not viewDate)
+    // -- backfilling a missed day can legitimately extend today's actual
+    // streak, and that's the moment worth celebrating.
     var streakBefore = L.computeStreakInfo(state, new Date());
 
     if (nowComplete && !wasComplete) {
@@ -1613,8 +1744,8 @@
     if (activeTimers[key]) {
       var elapsed = Date.now() - activeTimers[key];
       delete activeTimers[key];
-      var vm = L.buildTodayViewModel(state, new Date());
-      var session = findOrCreateTodaySession(vm.templateId, vm.isRest ? "Rest" : vm.template.label);
+      var vm = L.buildTodayViewModel(state, viewDate);
+      var session = findOrCreateSessionForViewedDate(vm.templateId, vm.isRest ? "Rest" : vm.template.label);
       var exEntry = session.exercises.find(function (e) { return e.name === row.dataset.exercise; });
       if (exEntry) {
         var idx = Number(row.dataset.set);
@@ -1639,11 +1770,11 @@
   }
 
   function saveCardio() {
-    var vm = L.buildTodayViewModel(state, new Date());
+    var vm = L.buildTodayViewModel(state, viewDate);
     var dayLabel = vm.isRest ? "Rest" : vm.template.label;
-    var session = findOrCreateTodaySession(vm.templateId, dayLabel);
+    var session = findOrCreateSessionForViewedDate(vm.templateId, dayLabel);
     var cardio = {
-      cardioType: $("#cardioType").value,
+      cardioType: fselectValue("cardioType"),
       durationMin: Number($("#cardioDuration").value) || 0,
       distanceMi: $("#cardioDistance").value ? Number($("#cardioDistance").value) : null,
       hr: $("#cardioHr").value ? Number($("#cardioHr").value) : null,
@@ -1672,10 +1803,12 @@
 
   /* ---------- readiness modal ---------- */
   function openReadinessModal() {
-    var existing = state.readiness[L.toDateKey(new Date())];
+    var dateKey = L.toDateKey(viewDate);
+    var existing = state.readiness[dateKey];
+    var titleSuffix = isRealToday(dateKey) ? "" : " — " + formatDateLabel(dateKey);
     var body =
       '<div class="modal-grip"></div>' +
-      '<div class="modal-head"><h2>Morning Check-In</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
+      '<div class="modal-head"><h2>' + (isRealToday(dateKey) ? "Morning Check-In" : "Readiness") + esc(titleSuffix) + '</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
       '<label class="field-label">Sleep score (0–100)</label>' +
       '<input type="number" id="inSleep" value="' + (existing ? existing.sleepScore : "") + '">' +
       '<div style="height:10px"></div>' +
@@ -1699,32 +1832,33 @@
       soreness: Number($("#inSoreness").value) || 3
     };
     var result = L.computeReadinessVerdict(input, state.baselines);
-    var dateKey = L.toDateKey(new Date());
+    var dateKey = L.toDateKey(viewDate);
     state.readiness[dateKey] = Object.assign({}, input, { verdict: result.verdict, score: result.score, checkedAt: new Date().toISOString() });
     Store.save();
     $("#readinessResult").innerHTML =
       '<div class="row"><span class="pill ' + result.verdict.toLowerCase() + '">' + result.verdict + '</span>' +
       '<button class="btn ghost sm" data-action="open-readiness">Re-check</button></div>';
-    renderReadinessPanel(L.buildTodayViewModel(state, new Date()));
+    renderReadinessPanel(L.buildTodayViewModel(state, viewDate));
   }
 
   /* ---------- swap modal ---------- */
   function openSwapModal() {
-    var vm = L.buildTodayViewModel(state, new Date());
+    var vm = L.buildTodayViewModel(state, viewDate);
     var templates = L.getTemplates(state);
     var options = L.TRAINING_TEMPLATE_IDS.map(function (id) {
       return '<button class="btn block" style="margin-bottom:6px;" data-action="confirm-swap" data-template="' + id + '">' + templates[id].label + "</button>";
     }).join("");
+    var titleSuffix = isRealToday(vm.dateKey) ? "" : " — " + formatDateLabel(vm.dateKey);
     var body =
       '<div class="modal-grip"></div>' +
-      '<div class="modal-head"><h2>Swap Today</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
+      '<div class="modal-head"><h2>Swap' + esc(titleSuffix) + '</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
       '<div class="muted" style="margin-bottom:10px;">This-week only — your regular plan resumes next week.</div>' +
       options;
     openModal(body);
   }
 
   function confirmSwap(el) {
-    var vm = L.buildTodayViewModel(state, new Date());
+    var vm = L.buildTodayViewModel(state, viewDate);
     var templateId = el.dataset.template;
     if (!state.weekOverrides[vm.weekKey]) state.weekOverrides[vm.weekKey] = {};
     state.weekOverrides[vm.weekKey][vm.weekday] = templateId;
@@ -1744,7 +1878,7 @@
       '<div style="height:8px"></div>' +
       '<div class="row" style="gap:8px;align-items:flex-start;">' +
       '<div style="flex:1"><label class="field-label">Sets</label><input type="number" id="customSets" value="3"></div>' +
-      '<div style="flex:1"><label class="field-label">Track by</label><select id="customMetric"><option value="reps">reps</option><option value="seconds">seconds</option></select></div>' +
+      '<div style="flex:1"><label class="field-label">Track by</label>' + renderFselect("customMetric", METRIC_OPTIONS, "reps") + "</div>" +
       "</div>" +
       '<div style="height:8px"></div>' +
       '<label class="muted" style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="customLoaded" checked> Weighted</label>' +
@@ -1752,6 +1886,7 @@
       '<button class="btn primary block" data-action="add-custom-exercise">Add to Today</button>';
     openModal(body);
     wireCustomExerciseAutocomplete();
+    wireFselect("customMetric", METRIC_OPTIONS, function () {});
   }
 
   function wireCustomExerciseAutocomplete() {
@@ -1781,7 +1916,7 @@
     $("#customName").value = name;
     $("#customSuggestions").innerHTML = "";
     if (entry) {
-      $("#customMetric").value = entry.metric || "reps";
+      setFselectValue("customMetric", entry.metric || "reps", METRIC_OPTIONS);
       $("#customLoaded").checked = entry.loaded !== undefined ? entry.loaded : true;
       if (entry.lastSetCount) $("#customSets").value = entry.lastSetCount;
     }
@@ -1790,12 +1925,12 @@
   function addCustomExercise() {
     var name = $("#customName").value.trim();
     var numSets = Math.max(1, Number($("#customSets").value) || 3);
-    var metric = $("#customMetric").value === "seconds" ? "seconds" : "reps";
+    var metric = fselectValue("customMetric") === "seconds" ? "seconds" : "reps";
     var loaded = $("#customLoaded").checked;
     if (!name) return;
-    var vm = L.buildTodayViewModel(state, new Date());
+    var vm = L.buildTodayViewModel(state, viewDate);
     var dayLabel = vm.isRest ? "Rest" : (vm.template ? vm.template.label : "Workout");
-    var session = findOrCreateTodaySession(vm.templateId, dayLabel);
+    var session = findOrCreateSessionForViewedDate(vm.templateId, dayLabel);
     var existing = session.exercises.find(function (e) { return e.name === name; });
     if (!existing) {
       var sets = [];
@@ -1858,40 +1993,35 @@
   function renderWeekPlanEditor() {
     var el = $("#weekPlanEditor");
     var templates = L.getTemplates(state);
+    var options = L.TRAINING_TEMPLATE_IDS.map(function (id) { return { value: id, label: templates[id].label }; });
+    var restDays = state.restDays;
     el.innerHTML = L.WEEKDAY_LABELS.map(function (label, day) {
-      var isRest = state.restDays.indexOf(day) !== -1;
-      var current = state.weekPlan[day];
-      var options = L.TRAINING_TEMPLATE_IDS.map(function (id) {
-        return '<option value="' + id + '"' + (id === current ? " selected" : "") + '>' + esc(templates[id].label) + "</option>";
-      }).join("");
+      var isRest = restDays.indexOf(day) !== -1;
       return '<div class="weekplan-row">' +
         '<div class="muted" style="font-weight:600;">' + label + "</div>" +
-        (isRest
-          ? '<div class="faint">Rest day</div>'
-          : '<select data-weekday="' + day + '">' + options + "</select>") +
+        (isRest ? '<div class="faint">Rest day</div>' : renderFselect("weekplan-" + day, options, state.weekPlan[day])) +
         "</div>";
     }).join("");
-    el.querySelectorAll("select[data-weekday]").forEach(function (sel) {
-      sel.addEventListener("change", function () {
-        var day = Number(sel.dataset.weekday);
-        state.weekPlan[day] = sel.value;
+    L.WEEKDAY_LABELS.forEach(function (label, day) {
+      if (restDays.indexOf(day) !== -1) return;
+      wireFselect("weekplan-" + day, options, function (value) {
+        state.weekPlan[day] = value;
         persistAndRerender();
       });
     });
   }
 
   function renderTemplatePicker() {
-    var el = $("#templatePicker");
+    var el = $("#templatePickerWrap");
     var templates = L.getTemplates(state);
     var editableIds = L.TRAINING_TEMPLATE_IDS.filter(function (id) { return !templates[id].isCardio; });
     if (editableIds.indexOf(planEditorTemplateId) === -1) planEditorTemplateId = editableIds[0];
-    el.innerHTML = editableIds.map(function (id) {
-      return '<option value="' + id + '"' + (id === planEditorTemplateId ? " selected" : "") + '>' + esc(templates[id].label) + "</option>";
-    }).join("");
-    el.onchange = function () {
-      planEditorTemplateId = el.value;
+    var options = editableIds.map(function (id) { return { value: id, label: templates[id].label }; });
+    el.innerHTML = renderFselect("templatePicker", options, planEditorTemplateId);
+    wireFselect("templatePicker", options, function (value) {
+      planEditorTemplateId = value;
       renderTemplateEditor();
-    };
+    });
   }
 
   function renderTemplateEditor() {
@@ -1905,7 +2035,7 @@
         '<div class="grid3">' +
         '<div><label class="field-label">Sets</label><input type="number" data-field="targetSets" value="' + def.targetSets + '"></div>' +
         '<div><label class="field-label">Target</label><input type="number" data-field="targetReps" value="' + def.targetReps + '"></div>' +
-        '<div><label class="field-label">Unit</label><select data-field="metric"><option value="reps"' + (def.metric === "reps" ? " selected" : "") + '>reps</option><option value="seconds"' + (def.metric === "seconds" ? " selected" : "") + '>seconds</option></select></div>' +
+        '<div><label class="field-label">Unit</label>' + renderFselect("tmpl-metric-" + i, METRIC_OPTIONS, def.metric) + "</div>" +
         "</div>" +
         '<div class="row" style="margin-top:8px;">' +
         '<label class="muted" style="display:flex;align-items:center;gap:6px;"><input type="checkbox" data-field="loaded"' + (def.loaded ? " checked" : "") + '> Weighted</label>' +
@@ -1929,6 +2059,9 @@
           patch[field] = value;
           updatePlanTemplate(function (t) { return L.updateExerciseInTemplate(t, index, patch); });
         });
+      });
+      wireFselect("tmpl-metric-" + index, METRIC_OPTIONS, function (value) {
+        updatePlanTemplate(function (t) { return L.updateExerciseInTemplate(t, index, { metric: value }); });
       });
     });
   }
