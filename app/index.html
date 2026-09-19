@@ -140,6 +140,9 @@
   input[type=checkbox]{width:18px;height:18px;}
   label.field-label{font-size:11px;color:var(--text-dim);display:block;margin-bottom:5px;font-weight:600;}
 
+  .week-nav{display:flex;align-items:center;justify-content:center;gap:4px;margin-bottom:8px;}
+  .week-nav .icon-btn{font-size:20px;line-height:1;color:var(--text-dim);padding:2px 12px;}
+  .week-nav-label{font-size:12px;font-weight:600;color:var(--text-dim);min-width:120px;text-align:center;}
   .day-strip-row{display:flex;gap:8px;align-items:center;margin-bottom:12px;}
   .day-strip{flex:1;min-width:0;display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;align-items:center;}
   .day-chip{
@@ -285,6 +288,11 @@
 <main>
   <!-- ===== TODAY ===== -->
   <section class="view active" id="view-today">
+    <div class="week-nav">
+      <button class="icon-btn" data-action="prev-week" aria-label="Previous week">‹</button>
+      <div class="week-nav-label" id="weekRangeLabel"></div>
+      <button class="icon-btn" data-action="next-week" aria-label="Next week">›</button>
+    </div>
     <div class="day-strip-row">
       <div class="day-strip" id="dayStrip"></div>
       <button class="btn ghost sm" id="jumpToTodayBtn" data-action="jump-to-today" style="display:none;flex-shrink:0;">Today</button>
@@ -1310,9 +1318,23 @@
   /* ---------- TODAY view ---------- */
   function renderToday() {
     var vm = L.buildTodayViewModel(state, viewDate);
+    renderWeekNav(vm);
     renderDayStrip(vm);
     renderReadinessPanel(vm);
     renderTodayContent(vm);
+  }
+
+  function renderWeekNav(vm) {
+    var el = $("#weekRangeLabel");
+    if (!el) return;
+    var start = new Date(vm.weekKey + "T00:00:00");
+    var end = L.addDays(start, 6);
+    var thisYear = new Date().getFullYear();
+    var startLabel = start.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    var endOpts = { month: "short", day: "numeric" };
+    if (end.getFullYear() !== thisYear) endOpts.year = "numeric";
+    var endLabel = end.toLocaleDateString(undefined, endOpts);
+    el.textContent = startLabel + " – " + endLabel;
   }
 
   function renderDayStrip(vm) {
@@ -1362,6 +1384,13 @@
     renderToday();
   }
 
+  // Shifts by a full week, preserving the currently-viewed weekday (e.g.
+  // viewing a Wednesday and going forward lands on next Wednesday).
+  function shiftWeek(delta) {
+    viewDate = L.addDays(viewDate, delta * 7);
+    renderToday();
+  }
+
   function renderTodayContent(vm) {
     var el = $("#todayContent");
     var restWarning = "";
@@ -1386,10 +1415,12 @@
       return;
     }
 
+    var dateTag = isRealToday(vm.dateKey) ? "Today" : formatDateLabel(vm.dateKey);
+
     if (vm.template.isCardio) {
       el.innerHTML = restWarning +
         '<div class="panel">' +
-        '<h2>' + esc(vm.template.label) + '<span class="tag">Today</span></h2>' +
+        '<h2>' + esc(vm.template.label) + '<span class="tag">' + esc(dateTag) + '</span></h2>' +
         '<div class="muted" style="margin-bottom:10px;">Structured cardio. Pick a type and log duration/effort — runs & walks already come in through Garmin.</div>' +
         '<div id="cardioFormSlot"></div>' +
         '<div style="margin-top:10px;"><button class="btn ghost sm" data-action="open-swap">Swap this day</button></div>' +
@@ -1405,7 +1436,7 @@
 
     var html = restWarning +
       '<div class="panel">' +
-      '<h2>' + esc(vm.template.label) + '<span class="tag">' + (allDone ? "Complete" : "Today") + '</span></h2>' +
+      '<h2>' + esc(vm.template.label) + '<span class="tag">' + (allDone ? "Complete" : esc(dateTag)) + '</span></h2>' +
       '<div style="margin-bottom:4px;"><button class="btn ghost sm" data-action="open-swap">Swap this day</button> ' +
       '<button class="btn ghost sm" data-action="open-custom-exercise">+ Custom Exercise</button></div>' +
       "</div>";
@@ -1578,6 +1609,8 @@
       case "close-modal": return closeModal();
       case "strip-day": return viewDay(el.dataset.date);
       case "jump-to-today": return viewDay(L.toDateKey(new Date()));
+      case "prev-week": return shiftWeek(-1);
+      case "next-week": return shiftWeek(1);
       case "toggle-rest-cardio": return toggleRestCardio();
       case "save-cardio": return saveCardio();
       case "toggle-set": return toggleSet(el);
