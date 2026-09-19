@@ -108,6 +108,19 @@ function main() {
   const noHistory = L.suggestProgression(loadedDef, null);
   check("no history falls back to target reps", noHistory.reps === loadedDef.targetReps);
 
+  /* ---- custom-exercise progression ("beat your last time") ---- */
+  const noCustomHistory = L.suggestCustomProgression(null);
+  check("suggestCustomProgression with no catalog entry reports no history", noCustomHistory.note === "no history");
+
+  const weightedCustomEntry = { name: "Farmer Carry", lastReps: 10, lastWeight: 40, loaded: true, metric: "reps" };
+  const weightedCustomSuggestion = L.suggestCustomProgression(weightedCustomEntry);
+  check("weighted custom exercise always suggests progress (target = last time)", weightedCustomSuggestion.note === "progress +weight");
+  check("weighted custom exercise suggestion bumps the weight up from last time", weightedCustomSuggestion.weight > 40);
+
+  const bodyweightCustomEntry = { name: "Wall Sit", lastReps: 45, lastWeight: 0, loaded: false, metric: "seconds" };
+  const bodyweightCustomSuggestion = L.suggestCustomProgression(bodyweightCustomEntry);
+  check("bodyweight custom exercise suggests +1 over last time", bodyweightCustomSuggestion.reps === 46);
+
   /* ---- XP / leveling ---- */
   const lvl1 = L.levelForXp(0);
   check("0 xp is level 1", lvl1.level === 1);
@@ -167,6 +180,25 @@ function main() {
   check("v1->v2 migration adds templates", !!fromV1.templates);
   check("v1->v2 migration adds longestStreak", fromV1.longestStreak === 0);
   check("v1->v2 migration preserves existing xp", fromV1.xp === 50);
+
+  // A v2 blob (has schemaVersion:2, catalog entries predating metric/loaded/
+  // lastSetCount) should backfill those fields without losing existing data.
+  const v2Blob = {
+    schemaVersion: 2, xp: 120, restDays: [0, 4], weekPlan: Object.assign({}, L.DEFAULT_WEEK_PLAN),
+    weekOverrides: {}, baselines: L.DEFAULT_BASELINES, sessions: [], readiness: {},
+    templates: L.cloneTemplates(L.WORKOUT_TEMPLATES), longestStreak: 3,
+    exercises: {
+      "Farmer Carry": { name: "Farmer Carry", lastReps: 10, lastWeight: 40, bestWeight: 40, updatedAt: "2026-08-01T00:00:00.000Z" },
+      "Wall Sit": { name: "Wall Sit", lastReps: 45, lastWeight: 0, bestWeight: 0, updatedAt: "2026-08-02T00:00:00.000Z" }
+    }
+  };
+  const fromV2 = L.migrate(v2Blob);
+  check("v2->v3 migration stamps current schema version", fromV2.schemaVersion === L.SCHEMA_VERSION);
+  check("v2->v3 migration preserves existing catalog data", fromV2.exercises["Farmer Carry"].lastWeight === 40);
+  check("v2->v3 migration infers loaded=true when bestWeight was ever > 0", fromV2.exercises["Farmer Carry"].loaded === true);
+  check("v2->v3 migration infers loaded=false when bestWeight was never > 0", fromV2.exercises["Wall Sit"].loaded === false);
+  check("v2->v3 migration defaults metric to reps", fromV2.exercises["Farmer Carry"].metric === "reps");
+  check("v2->v3 migration adds lastSetCount as null (unknown)", fromV2.exercises["Farmer Carry"].lastSetCount === null);
 
   const alreadyCurrent = L.migrate(L.freshState());
   check("migrating already-current state is a no-op passthrough", alreadyCurrent.schemaVersion === L.SCHEMA_VERSION);

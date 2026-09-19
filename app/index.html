@@ -202,7 +202,10 @@
   .history-item .row1{display:flex;justify-content:space-between;font-size:13px;font-weight:600;}
   .history-item .row2{font-size:12px;color:var(--text-dim);margin-top:2px;}
 
-  select.exercise-picker{margin-bottom:8px;}
+  .suggestion-item{display:flex;justify-content:space-between;gap:8px;padding:9px 10px;border:1px solid var(--border);border-top:none;font-size:13px;background:var(--bg-elevated);}
+  .suggestion-item:first-child{border-top:1px solid var(--border);border-radius:var(--radius-sm) var(--radius-sm) 0 0;}
+  .suggestion-item:last-child{border-radius:0 0 var(--radius-sm) var(--radius-sm);}
+  .suggestion-item:active{background:var(--accent-soft);}
 
   /* attribute bars */
   .attr-row{margin-bottom:12px;}
@@ -396,7 +399,7 @@
 (function (root) {
   "use strict";
 
-  var SCHEMA_VERSION = 2;
+  var SCHEMA_VERSION = 3;
 
   var WEEKDAY_LABELS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 
@@ -524,6 +527,19 @@
     }
   }
   function round2(n) { return Math.round(n * 100) / 100; }
+
+  // Custom/one-off exercises have no fixed target -- the "target" is your
+  // own last performance, so this always resolves to a progress suggestion
+  // (never "no history" once logged once). Returns the same shape as
+  // suggestProgression with a note of "no history" when never logged.
+  function suggestCustomProgression(catalogEntry) {
+    if (!catalogEntry || !catalogEntry.lastReps) {
+      return { weight: 0, reps: 0, note: "no history" };
+    }
+    var def = { loaded: !!catalogEntry.loaded, targetReps: catalogEntry.lastReps };
+    var lastPerf = { weight: catalogEntry.lastWeight || 0, reps: catalogEntry.lastReps, targetReps: catalogEntry.lastReps };
+    return suggestProgression(def, lastPerf);
+  }
 
   /* ---------- set completion ---------- */
   function isSetFilled(set) {
@@ -747,6 +763,10 @@
       state = migrateV1ToV2(state);
       version = 2;
     }
+    if (version === 2) {
+      state = migrateV2ToV3(state);
+      version = 3;
+    }
     state.schemaVersion = SCHEMA_VERSION;
     return state;
   }
@@ -785,6 +805,27 @@
     var next = Object.assign({}, state);
     if (!next.templates) next.templates = cloneTemplates(WORKOUT_TEMPLATES);
     if (typeof next.longestStreak !== "number") next.longestStreak = 0;
+    return next;
+  }
+
+  // Backfills metric ("reps"/"seconds"), loaded (weighted or bodyweight),
+  // and lastSetCount onto every catalog entry so a repeated custom
+  // exercise can be reconstructed with its remembered shape instead of a
+  // blank form. Old entries never recorded these explicitly, so infer
+  // loaded from whether any weight was ever logged and default metric to
+  // "reps" (custom exercises were hardcoded to "reps" before this change).
+  function migrateV2ToV3(state) {
+    var next = Object.assign({}, state);
+    var exercises = {};
+    Object.keys(next.exercises || {}).forEach(function (name) {
+      var e = next.exercises[name];
+      exercises[name] = Object.assign({
+        metric: "reps",
+        loaded: !!(e.bestWeight > 0),
+        lastSetCount: null
+      }, e);
+    });
+    next.exercises = exercises;
     return next;
   }
 
@@ -987,6 +1028,7 @@
     longestConsecutiveRestRun: longestConsecutiveRestRun,
     validateRestDays: validateRestDays,
     suggestProgression: suggestProgression,
+    suggestCustomProgression: suggestCustomProgression,
     isSetFilled: isSetFilled,
     allSetsComplete: allSetsComplete,
     xpForSet: xpForSet,
@@ -1251,8 +1293,9 @@
 
     var customEx = (vm.todaySession && vm.todaySession.exercises || []).filter(function (e) { return e.isCustom; });
     html += customEx.map(function (e) {
-      var def = { name: e.name, metric: e.metric || "reps", loaded: true, targetSets: e.sets.length || 1, targetReps: 0 };
-      var evm = { def: def, sets: e.sets, suggestion: { note: "custom" }, complete: L.allSetsComplete(e.sets, e.sets.length) };
+      var def = { name: e.name, metric: e.metric || "reps", loaded: e.loaded !== undefined ? e.loaded : true, targetSets: e.sets.length || 1, targetReps: 0 };
+      var suggestion = L.suggestCustomProgression(state.exercises[e.name]);
+      var evm = { def: def, sets: e.sets, suggestion: suggestion, complete: L.allSetsComplete(e.sets, e.sets.length) };
       return renderExerciseCard(evm, true);
     }).join("");
 
@@ -1262,9 +1305,14 @@
   function renderExerciseCard(evm, isCustom) {
     var def = evm.def;
     var unit = def.metric === "seconds" ? "sec" : "reps";
-    var targetLine = isCustom
-      ? esc(def.targetSets) + " sets logged"
-      : def.targetSets + " × " + def.targetReps + " " + unit + (def.loaded ? " · suggested " + evm.suggestion.reps + " " + unit + " @ " + evm.suggestion.weight + " lb (" + evm.suggestion.note + ")" : " · bodyweight");
+    var targetLine;
+    if (isCustom) {
+      targetLine = evm.suggestion.note === "no history"
+        ? def.targetSets + " sets · no history yet"
+        : def.targetSets + " sets · suggested " + evm.suggestion.reps + " " + unit + (def.loaded ? " @ " + evm.suggestion.weight + " lb" : "") + " (" + evm.suggestion.note + ")";
+    } else {
+      targetLine = def.targetSets + " × " + def.targetReps + " " + unit + (def.loaded ? " · suggested " + evm.suggestion.reps + " " + unit + " @ " + evm.suggestion.weight + " lb (" + evm.suggestion.note + ")" : " · bodyweight");
+    }
 
     var rows = evm.sets.map(function (set, i) {
       var checked = L.isSetFilled(set);
@@ -1416,6 +1464,7 @@
       case "submit-readiness": return submitReadiness();
       case "confirm-swap": return confirmSwap(el);
       case "add-custom-exercise": return addCustomExercise();
+      case "pick-custom-suggestion": return pickCustomSuggestion(el);
       case "plan-add-exercise": return planAddExercise();
       case "plan-remove-exercise": return planRemoveExercise(el);
       case "plan-move-exercise": return planMoveExercise(el);
@@ -1452,7 +1501,7 @@
     var exEntry = session.exercises.find(function (e) { return e.name === exerciseName; });
     if (!exEntry) {
       var def = (vm.template.exercises || []).find(function (d) { return d.name === exerciseName; });
-      exEntry = { name: exerciseName, isCustom: !def, metric: def ? def.metric : "reps", sets: [] };
+      exEntry = { name: exerciseName, isCustom: !def, metric: def ? def.metric : "reps", loaded: def ? def.loaded : true, sets: [] };
       session.exercises.push(exEntry);
     }
     while (exEntry.sets.length <= setIdx) exEntry.sets.push({ reps: null, weight: null, cadenceMs: null });
@@ -1533,6 +1582,9 @@
       lastReps: lastSet.reps,
       lastWeight: lastSet.weight || 0,
       bestWeight: Math.max((prev && prev.bestWeight) || 0, maxWeightInSession),
+      metric: exEntry.metric || (prev && prev.metric) || "reps",
+      loaded: exEntry.loaded !== undefined ? exEntry.loaded : ((prev && prev.loaded) || maxWeightInSession > 0),
+      lastSetCount: exEntry.sets.length,
       updatedAt: new Date().toISOString()
     };
   }
@@ -1683,31 +1735,63 @@
 
   /* ---------- custom exercise modal ---------- */
   function openCustomExerciseModal() {
-    var known = Object.keys(state.exercises);
     var body =
       '<div class="modal-grip"></div>' +
       '<div class="modal-head"><h2>Custom Exercise</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
-      (known.length ? '<label class="field-label">Quick-pick</label><select class="exercise-picker" id="customPick"><option value="">— new —</option>' +
-        known.map(function (n) { return "<option value=\"" + esc(n) + "\">" + esc(n) + "</option>"; }).join("") + "</select>" : "") +
       '<label class="field-label">Name</label>' +
-      '<input type="text" id="customName">' +
+      '<input type="text" id="customName" autocomplete="off" placeholder="Type to search or add new">' +
+      '<div id="customSuggestions"></div>' +
       '<div style="height:8px"></div>' +
-      '<label class="field-label">Sets</label>' +
-      '<input type="number" id="customSets" value="3">' +
+      '<div class="row" style="gap:8px;align-items:flex-start;">' +
+      '<div style="flex:1"><label class="field-label">Sets</label><input type="number" id="customSets" value="3"></div>' +
+      '<div style="flex:1"><label class="field-label">Track by</label><select id="customMetric"><option value="reps">reps</option><option value="seconds">seconds</option></select></div>' +
+      "</div>" +
+      '<div style="height:8px"></div>' +
+      '<label class="muted" style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="customLoaded" checked> Weighted</label>' +
       '<div style="height:10px"></div>' +
       '<button class="btn primary block" data-action="add-custom-exercise">Add to Today</button>';
     openModal(body);
-    var pick = $("#customPick");
-    if (pick) {
-      pick.addEventListener("change", function () {
-        if (pick.value) $("#customName").value = pick.value;
-      });
+    wireCustomExerciseAutocomplete();
+  }
+
+  function wireCustomExerciseAutocomplete() {
+    var input = $("#customName");
+    var list = $("#customSuggestions");
+    input.addEventListener("input", function () {
+      var q = input.value.trim().toLowerCase();
+      if (!q) { list.innerHTML = ""; return; }
+      var names = Object.keys(state.exercises)
+        .filter(function (n) { return n.toLowerCase().indexOf(q) !== -1; })
+        .slice(0, 6);
+      if (!names.length) { list.innerHTML = ""; return; }
+      list.innerHTML = names.map(function (name) {
+        var entry = state.exercises[name];
+        var meta = entry.loaded
+          ? (entry.lastWeight || 0) + " lb last time"
+          : (entry.lastReps || 0) + (entry.metric === "seconds" ? " sec" : " reps") + " last time";
+        return '<div class="suggestion-item" data-action="pick-custom-suggestion" data-exercise="' + esc(name) + '">' +
+          "<span>" + esc(name) + '</span><span class="faint">' + esc(meta) + "</span></div>";
+      }).join("");
+    });
+  }
+
+  function pickCustomSuggestion(el) {
+    var name = el.dataset.exercise;
+    var entry = state.exercises[name];
+    $("#customName").value = name;
+    $("#customSuggestions").innerHTML = "";
+    if (entry) {
+      $("#customMetric").value = entry.metric || "reps";
+      $("#customLoaded").checked = entry.loaded !== undefined ? entry.loaded : true;
+      if (entry.lastSetCount) $("#customSets").value = entry.lastSetCount;
     }
   }
 
   function addCustomExercise() {
     var name = $("#customName").value.trim();
     var numSets = Math.max(1, Number($("#customSets").value) || 3);
+    var metric = $("#customMetric").value === "seconds" ? "seconds" : "reps";
+    var loaded = $("#customLoaded").checked;
     if (!name) return;
     var vm = L.buildTodayViewModel(state, new Date());
     var dayLabel = vm.isRest ? "Rest" : (vm.template ? vm.template.label : "Workout");
@@ -1716,7 +1800,7 @@
     if (!existing) {
       var sets = [];
       for (var i = 0; i < numSets; i++) sets.push({ reps: null, weight: null, cadenceMs: null });
-      session.exercises.push({ name: name, isCustom: true, metric: "reps", sets: sets });
+      session.exercises.push({ name: name, isCustom: true, metric: metric, loaded: loaded, sets: sets });
     }
     Store.save();
     closeModal();
