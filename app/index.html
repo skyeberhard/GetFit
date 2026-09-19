@@ -619,21 +619,33 @@
   }
 
   /* ---------- readiness engine ---------- */
+  // A blank/missing field contributes nothing (neutral), never scores as an
+  // extreme in either direction. Previously an empty field coerced to 0,
+  // which made blank resting HR score as the best possible reading (0 is
+  // always <= baseline) while blank sleep score as the worst (0 is always
+  // < the low threshold) -- the same missing input treated as great news for
+  // one field and terrible news for the other, by accident of arithmetic.
+  function hasValue(v) { return v !== null && v !== undefined && v !== ""; }
+
   function computeReadinessScore(input, baselines) {
     var score = 0;
-    var sleep = Number(input.sleepScore);
-    var rhr = Number(input.restingHR);
+
+    if (hasValue(input.sleepScore)) {
+      var sleep = Number(input.sleepScore);
+      if (sleep >= baselines.sleepGood + 15) score += 2;
+      else if (sleep >= baselines.sleepGood) score += 1;
+      else if (sleep < baselines.sleepLow) score -= 2;
+    }
+
+    if (hasValue(input.restingHR)) {
+      var rhr = Number(input.restingHR);
+      if (rhr <= baselines.restingHR - 3) score += 2;
+      else if (rhr <= baselines.restingHR) score += 1;
+      else if (rhr >= baselines.restingHR + 10) score -= 2;
+      else if (rhr >= baselines.restingHR + 5) score -= 1;
+    }
+
     var soreness = Number(input.soreness);
-
-    if (sleep >= baselines.sleepGood + 15) score += 2;
-    else if (sleep >= baselines.sleepGood) score += 1;
-    else if (sleep < baselines.sleepLow) score -= 2;
-
-    if (rhr <= baselines.restingHR - 3) score += 2;
-    else if (rhr <= baselines.restingHR) score += 1;
-    else if (rhr >= baselines.restingHR + 10) score -= 2;
-    else if (rhr >= baselines.restingHR + 5) score -= 1;
-
     var sorenessTable = { 1: 1, 2: 0, 3: -1, 4: -2, 5: -3 };
     score += sorenessTable.hasOwnProperty(soreness) ? sorenessTable[soreness] : 0;
 
@@ -1055,13 +1067,15 @@
       lines.push("- none logged");
     }
     lines.push("");
-    lines.push("## Current plan");
+    lines.push("## Current plan" + " (this week, including any swaps)");
     var templates = getTemplates(state);
+    var digestWeekKey = weekStartKey(now);
     for (var d = 0; d < 7; d++) {
       var isRest = isRestDay(state.restDays, d);
-      var tid = state.weekPlan[d];
+      var tid = resolvePlanDay(state.weekPlan, state.weekOverrides, digestWeekKey, d);
+      var wasSwapped = !!(state.weekOverrides[digestWeekKey] && Object.prototype.hasOwnProperty.call(state.weekOverrides[digestWeekKey], d));
       var label = isRest ? "Rest" : (templates[tid] ? templates[tid].label : tid);
-      lines.push("- " + WEEKDAY_LABELS[d] + ": " + label);
+      lines.push("- " + WEEKDAY_LABELS[d] + ": " + label + (wasSwapped ? " (swapped this week)" : ""));
     }
     lines.push("");
     lines.push("## Ask");
@@ -1346,6 +1360,11 @@
   function awardXp(amount, label) {
     if (amount <= 0) return;
     state.xp += amount;
+    // Streak-milestone bonuses are awarded from inside a setTimeout, well
+    // after the synchronous Store.save() that triggered them has already
+    // run -- without saving here too, that XP shows in the toast but never
+    // reaches disk unless something else happens to save afterward.
+    Store.save();
     var toast = $("#xpToast");
     toast.textContent = "+" + amount + " XP" + (label ? " · " + label : "");
     toast.classList.add("show");
@@ -1395,9 +1414,11 @@
     var dateLabel = isRealToday(vm.dateKey) ? "" : " — " + formatDateLabel(vm.dateKey);
     if (vm.readinessToday) {
       var v = vm.readinessToday.verdict;
+      var sleepDisplay = vm.readinessToday.sleepScore == null ? "—" : vm.readinessToday.sleepScore;
+      var rhrDisplay = vm.readinessToday.restingHR == null ? "—" : vm.readinessToday.restingHR;
       el.innerHTML =
         '<h2>Readiness' + esc(dateLabel) + ' <span class="pill ' + v.toLowerCase() + '">' + v + "</span></h2>" +
-        '<div class="row"><div class="muted">Sleep ' + vm.readinessToday.sleepScore + " · RHR " + vm.readinessToday.restingHR + " · Soreness " + vm.readinessToday.soreness + "/5</div>" +
+        '<div class="row"><div class="muted">Sleep ' + sleepDisplay + " · RHR " + rhrDisplay + " · Soreness " + vm.readinessToday.soreness + "/5</div>" +
         '<button class="btn ghost sm" data-action="open-readiness">Re-check</button></div>';
     } else {
       el.innerHTML =
@@ -1805,15 +1826,25 @@
   }
 
   function updateExerciseCatalog(name, exEntry) {
-    var lastSet = exEntry.sets.filter(function (s) { return L.isSetFilled(s); }).slice(-1)[0];
-    if (!lastSet) return;
+    var filled = exEntry.sets.filter(function (s) { return L.isSetFilled(s); });
+    if (!filled.length) return;
     var prev = state.exercises[name];
-    var maxWeightInSession = exEntry.sets.reduce(function (m, s) { return (s.weight && s.weight > m) ? s.weight : m; }, 0);
-    var maxRepsInSession = exEntry.sets.reduce(function (m, s) { return (s.reps && s.reps > m) ? s.reps : m; }, 0);
+    var maxWeightInSession = filled.reduce(function (m, s) { return (s.weight && s.weight > m) ? s.weight : m; }, 0);
+    var maxRepsInSession = filled.reduce(function (m, s) { return (s.reps && s.reps > m) ? s.reps : m; }, 0);
+    // lastReps is the WORST (minimum) set this session, not literally the
+    // last one typed -- suggestProgression treats "lastReps >= target" as
+    // "hit target," so using the last-typed set made that order-dependent:
+    // 12/12/8 and 8/12/12 produced different suggestions despite being the
+    // same session, and either could look like a false "hit" depending on
+    // which set happened to be filled last. Using the minimum makes "hit
+    // target" correctly mean every set met it. lastWeight is the max used
+    // this session (the weight actually being worked at), not whichever set
+    // happened to be filled last.
+    var minRepsInSession = filled.reduce(function (m, s) { return s.reps < m ? s.reps : m; }, filled[0].reps);
     state.exercises[name] = {
       name: name,
-      lastReps: lastSet.reps,
-      lastWeight: lastSet.weight || 0,
+      lastReps: minRepsInSession,
+      lastWeight: maxWeightInSession,
       bestWeight: Math.max((prev && prev.bestWeight) || 0, maxWeightInSession),
       bestReps: Math.max((prev && prev.bestReps) || 0, maxRepsInSession),
       metric: exEntry.metric || (prev && prev.metric) || "reps",
@@ -1913,10 +1944,10 @@
       '<div class="modal-grip"></div>' +
       '<div class="modal-head"><h2>' + (isRealToday(dateKey) ? "Morning Check-In" : "Readiness") + esc(titleSuffix) + '</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
       '<label class="field-label">Sleep score (0–100)</label>' +
-      '<input type="number" id="inSleep" value="' + (existing ? existing.sleepScore : "") + '">' +
+      '<input type="number" id="inSleep" value="' + (existing && existing.sleepScore != null ? existing.sleepScore : "") + '">' +
       '<div style="height:10px"></div>' +
       '<label class="field-label">Resting HR (bpm)</label>' +
-      '<input type="number" id="inRhr" value="' + (existing ? existing.restingHR : "") + '">' +
+      '<input type="number" id="inRhr" value="' + (existing && existing.restingHR != null ? existing.restingHR : "") + '">' +
       '<div class="muted" style="margin-top:4px;">Check before coffee / driving — both spike RHR 15–20 bpm.</div>' +
       '<div style="height:10px"></div>' +
       '<label class="field-label">Soreness (1 none – 5 severe)</label>' +
@@ -1929,9 +1960,12 @@
   }
 
   function submitReadiness() {
+    // Blank stays blank (null), not 0 -- 0 would silently score as an
+    // extreme value (see computeReadinessScore) instead of contributing
+    // nothing, as a field you didn't measure should.
     var input = {
-      sleepScore: Number($("#inSleep").value) || 0,
-      restingHR: Number($("#inRhr").value) || 0,
+      sleepScore: $("#inSleep").value === "" ? null : Number($("#inSleep").value),
+      restingHR: $("#inRhr").value === "" ? null : Number($("#inRhr").value),
       soreness: Number($("#inSoreness").value) || 3
     };
     var result = L.computeReadinessVerdict(input, state.baselines);
@@ -2169,7 +2203,10 @@
           var field = fieldEl.dataset.field;
           var value;
           if (field === "loaded") value = fieldEl.checked;
-          else if (field === "targetSets" || field === "targetReps") value = Math.max(0, Number(fieldEl.value) || 0);
+          // Floor at 1, not 0: allSetsComplete(sets, 0) trivially returns true
+          // with nothing logged, which would falsely mark the exercise (and
+          // potentially the whole day, feeding the streak) complete.
+          else if (field === "targetSets" || field === "targetReps") value = Math.max(1, Number(fieldEl.value) || 0);
           else value = fieldEl.value;
           var patch = {};
           patch[field] = value;
@@ -2377,6 +2414,10 @@
     $("#importFile").addEventListener("change", function (e) {
       var file = e.target.files[0];
       if (!file) return;
+      if (!confirm("Importing will replace all current data on this device. Continue?")) {
+        e.target.value = "";
+        return;
+      }
       var reader = new FileReader();
       reader.onload = function () {
         try {

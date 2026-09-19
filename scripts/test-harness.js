@@ -93,6 +93,19 @@ function main() {
   const caffeineSkew = L.computeReadinessVerdict({ sleepScore: 80, restingHR: 71, soreness: 2 }, baselines);
   check("elevated RHR (post-coffee-like) pulls down from PUSH", caffeineSkew.verdict !== "PUSH");
 
+  /* ---- readiness: a blank field must be neutral, not an accidental extreme ---- */
+  const blankRhrScore = L.computeReadinessScore({ sleepScore: 72, restingHR: null, soreness: 3 }, baselines);
+  const sameWithGoodRhr = L.computeReadinessScore({ sleepScore: 72, restingHR: baselines.restingHR, soreness: 3 }, baselines);
+  check("blank resting HR does not score as an excellent reading", blankRhrScore < sameWithGoodRhr);
+  check("blank resting HR contributes exactly 0 (matches sleep/soreness-only score)", blankRhrScore === L.computeReadinessScore({ sleepScore: 72, soreness: 3 }, baselines));
+
+  const blankSleepScore = L.computeReadinessScore({ sleepScore: null, restingHR: baselines.restingHR, soreness: 3 }, baselines);
+  check("blank sleep score does not score as the worst possible reading", blankSleepScore > L.computeReadinessScore({ sleepScore: 0, restingHR: baselines.restingHR, soreness: 3 }, baselines));
+  check("blank sleep score contributes exactly 0", blankSleepScore === L.computeReadinessScore({ restingHR: baselines.restingHR, soreness: 3 }, baselines));
+
+  const allBlankExceptSoreness = L.computeReadinessScore({ sleepScore: null, restingHR: null, soreness: 3 }, baselines);
+  check("all fields blank except soreness scores purely from soreness", allBlankExceptSoreness === -1); // soreness 3 -> -1, per the table
+
   /* ---- progression suggestion ---- */
   const loadedDef = { name: "Goblet Squat", metric: "reps", loaded: true, targetSets: 4, targetReps: 12 };
   const hitTarget = L.suggestProgression(loadedDef, { weight: 30, reps: 12, targetReps: 12 });
@@ -408,6 +421,17 @@ function main() {
   check("digest is a non-empty string", typeof digest === "string" && digest.length > 100);
   check("digest includes the streak snapshot", digest.indexOf("Current streak") !== -1);
   check("digest includes a PR section", digest.indexOf("PRs in the last 30 days") !== -1);
+
+  // Regression: the digest's "Current plan" must reflect an active
+  // this-week swap, not just the permanent weekPlan -- otherwise an AI
+  // reviewing it would be told about a day that isn't actually happening.
+  const swapDigestState = L.freshState();
+  swapDigestState.restDays = [0, 4];
+  const digestWeekKey = L.weekStartKey(fridayMorning);
+  swapDigestState.weekOverrides[digestWeekKey] = { 5: "cardio" }; // Friday's upperB swapped to cardio this week
+  const swapDigest = L.buildDigest(swapDigestState, fridayMorning);
+  check("digest reflects an active this-week swap rather than the permanent plan", swapDigest.indexOf("Fri: Cardio (swapped this week)") !== -1);
+  check("digest does not show the pre-swap permanent assignment for a swapped day", swapDigest.indexOf("Fri: Upper Body — Accessory") === -1);
 
   /* ---- exercise history (progress trend view) ---- */
   const exHistSessions = [
