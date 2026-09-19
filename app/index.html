@@ -654,16 +654,25 @@
   /* ---------- day compliance / streak / consistency ---------- */
   function isDayCompliant(state, dateObj) {
     var weekday = dateObj.getDay();
-    var weekKey = weekStartKey(dateObj);
     var dateKey = toDateKey(dateObj);
     if (isRestDay(state.restDays, weekday)) return true;
-    var templateId = resolvePlanDay(state.weekPlan, state.weekOverrides, weekKey, weekday);
-    var template = getTemplates(state)[templateId];
-    if (!template) return false;
+
     var session = (state.sessions || []).filter(function (s) { return s.date === dateKey; })[0];
     if (!session) return false;
-    if (template.isCardio) return !!session.cardio;
-    return template.exercises.every(function (def) {
+
+    // Prefer what the session itself recorded (templateId at the time it was
+    // created, and a frozen snapshot of that template's exercises) over
+    // re-resolving today's live plan -- a later weekPlan reassignment or
+    // template edit must not retroactively change whether a past day counted.
+    // Sessions logged before this existed have neither, so they fall back to
+    // the old (re-resolve-live) behavior; there's no way to recover history
+    // that was never recorded.
+    var templateId = session.templateId || resolvePlanDay(state.weekPlan, state.weekOverrides, weekStartKey(dateObj), weekday);
+    var snapshot = session.templateSnapshot || getTemplates(state)[templateId];
+    if (!snapshot) return false;
+
+    if (snapshot.isCardio) return !!session.cardio;
+    return snapshot.exercises.every(function (def) {
       var e = session.exercises && session.exercises.filter(function (x) { return x.name === def.name; })[0];
       return !!e && allSetsComplete(e.sets, def.targetSets);
     });
@@ -701,20 +710,39 @@
   }
 
   /* ---------- PRs / attributes ---------- */
+  // A PR is a new best weight for a loaded performance, OR a new best
+  // reps/seconds for a bodyweight one (no weight logged that session) --
+  // otherwise bodyweight movements (Push-Up, Plank, etc.) could never
+  // register a PR at all, no matter how much they improved.
   function countRecentPRs(sessions, sinceDateKey) {
     var sorted = sessions.slice().sort(function (a, b) { return a.date.localeCompare(b.date); });
-    var best = {};
+    var bestWeight = {};
+    var bestReps = {};
     var prs = [];
     sorted.forEach(function (session) {
       (session.exercises || []).forEach(function (ex) {
-        var maxWeight = (ex.sets || []).reduce(function (m, s) { return (s.weight && s.weight > m) ? s.weight : m; }, 0);
-        if (maxWeight <= 0) return;
-        var prevBest = best[ex.name] || 0;
-        if (maxWeight > prevBest) {
-          if (!sinceDateKey || session.date >= sinceDateKey) {
-            prs.push({ date: session.date, exercise: ex.name, weight: maxWeight });
+        var filled = (ex.sets || []).filter(isSetFilled);
+        if (!filled.length) return;
+        var maxWeight = filled.reduce(function (m, s) { return (s.weight && s.weight > m) ? s.weight : m; }, 0);
+
+        if (maxWeight > 0) {
+          var prevWeight = bestWeight[ex.name] || 0;
+          if (maxWeight > prevWeight) {
+            if (!sinceDateKey || session.date >= sinceDateKey) {
+              prs.push({ date: session.date, exercise: ex.name, type: "weight", weight: maxWeight });
+            }
+            bestWeight[ex.name] = maxWeight;
           }
-          best[ex.name] = maxWeight;
+        } else {
+          var maxReps = filled.reduce(function (m, s) { return (s.reps && s.reps > m) ? s.reps : m; }, 0);
+          if (maxReps <= 0) return;
+          var prevReps = bestReps[ex.name] || 0;
+          if (maxReps > prevReps) {
+            if (!sinceDateKey || session.date >= sinceDateKey) {
+              prs.push({ date: session.date, exercise: ex.name, type: "reps", reps: maxReps });
+            }
+            bestReps[ex.name] = maxReps;
+          }
         }
       });
     });
@@ -857,6 +885,13 @@
 
   function cloneTemplates(templates) {
     return JSON.parse(JSON.stringify(templates));
+  }
+
+  // A frozen-in-time copy of what a template looked like when a session was
+  // created against it -- so editing the template later can't retroactively
+  // change what a past day was actually assigned.
+  function snapshotTemplate(template) {
+    return JSON.parse(JSON.stringify({ isCardio: !!template.isCardio, exercises: template.exercises || [] }));
   }
 
   function freshStateV1() {
@@ -1013,7 +1048,9 @@
     lines.push("");
     lines.push("## PRs in the last 30 days");
     if (prs.length) {
-      prs.slice(-15).forEach(function (pr) { lines.push("- " + pr.date + ": " + pr.exercise + " @ " + pr.weight + " lb"); });
+      prs.slice(-15).forEach(function (pr) {
+        lines.push("- " + pr.date + ": " + pr.exercise + (pr.type === "reps" ? " — " + pr.reps + " reps" : " @ " + pr.weight + " lb"));
+      });
     } else {
       lines.push("- none logged");
     }
@@ -1073,6 +1110,7 @@
     migrate: migrate,
     freshState: freshState,
     cloneTemplates: cloneTemplates,
+    snapshotTemplate: snapshotTemplate,
     addExerciseToTemplate: addExerciseToTemplate,
     removeExerciseFromTemplate: removeExerciseFromTemplate,
     moveExerciseInTemplate: moveExerciseInTemplate,
@@ -1417,7 +1455,14 @@
 
     var dateTag = isRealToday(vm.dateKey) ? "Today" : formatDateLabel(vm.dateKey);
 
-    if (vm.template.isCardio) {
+    // If this day already has a session, show what was actually assigned
+    // when it was logged (its snapshot) rather than today's live template --
+    // otherwise a later template edit would silently rewrite what a past
+    // day's screen shows. A day with no session yet has nothing to preserve,
+    // so it shows the current live plan (what you're about to log against).
+    var effectiveTemplate = (vm.todaySession && vm.todaySession.templateSnapshot) ? vm.todaySession.templateSnapshot : vm.template;
+
+    if (effectiveTemplate.isCardio) {
       el.innerHTML = restWarning +
         '<div class="panel">' +
         '<h2>' + esc(vm.template.label) + '<span class="tag">' + esc(dateTag) + '</span></h2>' +
@@ -1429,7 +1474,7 @@
       return;
     }
 
-    var exVms = vm.template.exercises.map(function (def) {
+    var exVms = effectiveTemplate.exercises.map(function (def) {
       return L.buildExerciseViewModel(def, vm.todaySession, state.exercises);
     });
     var allDone = exVms.every(function (e) { return e.complete; });
@@ -1636,11 +1681,18 @@
   }
 
   /* ---------- set logging ---------- */
-  function findOrCreateSessionForViewedDate(templateId, dayLabel) {
+  function findOrCreateSessionForViewedDate(vm, dayLabel) {
     var dateKey = L.toDateKey(viewDate);
     var s = state.sessions.find(function (x) { return x.date === dateKey; });
     if (!s) {
-      s = { id: Date.now(), date: dateKey, dayLabel: dayLabel, type: "workout", templateId: templateId, exercises: [], cardio: null, xpEarned: 0, completedAt: null };
+      s = {
+        id: Date.now(), date: dateKey, dayLabel: dayLabel, type: "workout",
+        templateId: vm.templateId, exercises: [], cardio: null, xpEarned: 0, completedAt: null,
+        // Freeze what was actually assigned today so editing the template
+        // later can't rewrite whether this day counted. Rest days have no
+        // template to snapshot, but they're always compliant regardless.
+        templateSnapshot: (!vm.isRest && vm.template) ? L.snapshotTemplate(vm.template) : null
+      };
       state.sessions.push(s);
     }
     return s;
@@ -1654,7 +1706,7 @@
 
     var vm = L.buildTodayViewModel(state, viewDate);
     var dayLabel = vm.isRest ? "Rest" : vm.template.label;
-    var session = findOrCreateSessionForViewedDate(vm.templateId, dayLabel);
+    var session = findOrCreateSessionForViewedDate(vm, dayLabel);
 
     var exEntry = session.exercises.find(function (e) { return e.name === exerciseName; });
     if (!exEntry) {
@@ -1684,7 +1736,10 @@
     // (not the outer viewDate) -- viewDate may have moved on to a different
     // day by the time this fires.
     var vm = L.buildTodayViewModel(state, new Date(session.date + "T00:00:00"));
-    var def = vm.template && vm.template.exercises ? vm.template.exercises.find(function (d) { return d.name === exerciseName; }) : null;
+    // Use what this session actually recorded as assigned, not today's live
+    // template -- same reasoning as isDayCompliant.
+    var effectiveTemplate = session.templateSnapshot || vm.template;
+    var def = effectiveTemplate && effectiveTemplate.exercises ? effectiveTemplate.exercises.find(function (d) { return d.name === exerciseName; }) : null;
     var exEntry = session.exercises.find(function (e) { return e.name === exerciseName; });
     var targetSets = def ? def.targetSets : exEntry.sets.length;
     var wasComplete = exEntry._wasComplete;
@@ -1697,15 +1752,28 @@
 
     if (nowComplete && !wasComplete) {
       var catalogPrev = state.exercises[exerciseName];
-      var prevBest = catalogPrev ? (catalogPrev.bestWeight || 0) : 0;
-      var prCount = exEntry.sets.slice(0, targetSets).filter(function (s) { return s.weight && s.weight > prevBest; }).length;
+      var setsThisExercise = exEntry.sets.slice(0, targetSets);
+      // A session with any weight logged is judged as a loaded performance
+      // (weight is the progression axis); otherwise it's bodyweight/timed,
+      // where reps (or seconds, same field) are the axis instead. Matches
+      // countRecentPRs so the "New PR!" toast and the Strength attribute
+      // agree on what counts as a PR.
+      var maxWeightThisTime = setsThisExercise.reduce(function (m, s) { return (s.weight && s.weight > m) ? s.weight : m; }, 0);
+      var prCount;
+      if (maxWeightThisTime > 0) {
+        var prevBestWeight = catalogPrev ? (catalogPrev.bestWeight || 0) : 0;
+        prCount = setsThisExercise.filter(function (s) { return s.weight && s.weight > prevBestWeight; }).length;
+      } else {
+        var prevBestReps = catalogPrev ? (catalogPrev.bestReps || 0) : 0;
+        prCount = setsThisExercise.filter(function (s) { return s.reps && s.reps > prevBestReps; }).length;
+      }
 
       var xp = exEntry.sets.slice(0, targetSets).reduce(function (sum, s) { return sum + L.xpForSet(s, def); }, 0);
       xp += prCount * L.PR_BONUS_XP;
       awardXp(xp, prCount > 0 ? (def ? def.name : exerciseName) + " • New PR!" : (def ? def.name : exerciseName));
       session.xpEarned = (session.xpEarned || 0) + xp;
       updateExerciseCatalog(exerciseName, exEntry);
-      checkWorkoutComplete(session, vm);
+      checkWorkoutComplete(session, effectiveTemplate);
     } else {
       updateExerciseCatalog(exerciseName, exEntry);
     }
@@ -1722,9 +1790,9 @@
     render();
   }
 
-  function checkWorkoutComplete(session, vm) {
-    if (!vm.template || vm.template.isCardio) return;
-    var allDone = vm.template.exercises.every(function (def) {
+  function checkWorkoutComplete(session, effectiveTemplate) {
+    if (!effectiveTemplate || effectiveTemplate.isCardio) return;
+    var allDone = effectiveTemplate.exercises.every(function (def) {
       var e = session.exercises.find(function (x) { return x.name === def.name; });
       return e && L.allSetsComplete(e.sets, def.targetSets);
     });
@@ -1741,11 +1809,13 @@
     if (!lastSet) return;
     var prev = state.exercises[name];
     var maxWeightInSession = exEntry.sets.reduce(function (m, s) { return (s.weight && s.weight > m) ? s.weight : m; }, 0);
+    var maxRepsInSession = exEntry.sets.reduce(function (m, s) { return (s.reps && s.reps > m) ? s.reps : m; }, 0);
     state.exercises[name] = {
       name: name,
       lastReps: lastSet.reps,
       lastWeight: lastSet.weight || 0,
       bestWeight: Math.max((prev && prev.bestWeight) || 0, maxWeightInSession),
+      bestReps: Math.max((prev && prev.bestReps) || 0, maxRepsInSession),
       metric: exEntry.metric || (prev && prev.metric) || "reps",
       loaded: exEntry.loaded !== undefined ? exEntry.loaded : ((prev && prev.loaded) || maxWeightInSession > 0),
       lastSetCount: exEntry.sets.length,
@@ -1778,7 +1848,7 @@
       var elapsed = Date.now() - activeTimers[key];
       delete activeTimers[key];
       var vm = L.buildTodayViewModel(state, viewDate);
-      var session = findOrCreateSessionForViewedDate(vm.templateId, vm.isRest ? "Rest" : vm.template.label);
+      var session = findOrCreateSessionForViewedDate(vm, vm.isRest ? "Rest" : vm.template.label);
       var exEntry = session.exercises.find(function (e) { return e.name === row.dataset.exercise; });
       if (exEntry) {
         var idx = Number(row.dataset.set);
@@ -1805,7 +1875,7 @@
   function saveCardio() {
     var vm = L.buildTodayViewModel(state, viewDate);
     var dayLabel = vm.isRest ? "Rest" : vm.template.label;
-    var session = findOrCreateSessionForViewedDate(vm.templateId, dayLabel);
+    var session = findOrCreateSessionForViewedDate(vm, dayLabel);
     var cardio = {
       cardioType: fselectValue("cardioType"),
       durationMin: Number($("#cardioDuration").value) || 0,
@@ -1895,6 +1965,19 @@
     var templateId = el.dataset.template;
     if (!state.weekOverrides[vm.weekKey]) state.weekOverrides[vm.weekKey] = {};
     state.weekOverrides[vm.weekKey][vm.weekday] = templateId;
+
+    // A swap is a deliberate, explicit correction to what THIS day is --
+    // unlike a template-content edit made elsewhere, it should take effect
+    // immediately even if a session already exists for this date (e.g. you
+    // swapped to cardio, logged something, then realized you meant a lift
+    // day). Re-baseline that session's recorded assignment/snapshot rather
+    // than leaving it pointing at the pre-swap type.
+    if (vm.todaySession) {
+      var newTemplate = L.getTemplates(state)[templateId];
+      vm.todaySession.templateId = templateId;
+      vm.todaySession.templateSnapshot = newTemplate ? L.snapshotTemplate(newTemplate) : null;
+    }
+
     Store.save();
     closeModal();
     render();
@@ -1963,7 +2046,7 @@
     if (!name) return;
     var vm = L.buildTodayViewModel(state, viewDate);
     var dayLabel = vm.isRest ? "Rest" : (vm.template ? vm.template.label : "Workout");
-    var session = findOrCreateSessionForViewedDate(vm.templateId, dayLabel);
+    var session = findOrCreateSessionForViewedDate(vm, dayLabel);
     var existing = session.exercises.find(function (e) { return e.name === name; });
     if (!existing) {
       var sets = [];

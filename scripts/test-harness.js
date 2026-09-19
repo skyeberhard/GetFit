@@ -296,6 +296,48 @@ function main() {
   const brokenStreak = L.computeStreakInfo(brokenStreakState, new Date("2026-09-25T09:00:00"));
   check("a gap on a training day breaks the streak", brokenStreak.throughYesterday < 4);
 
+  /* ---- template snapshot: a later template/plan edit must not rewrite
+     whether a past day counted, since the session already recorded what
+     was actually assigned to it ---- */
+  function buildSnapshottedSession(date, templateId, template, complete) {
+    var exercises = template.exercises.map(function (def) {
+      var sets = [];
+      for (var i = 0; i < def.targetSets; i++) sets.push({ reps: complete ? def.targetReps : null, weight: def.loaded ? 20 : 0, cadenceMs: null });
+      return { name: def.name, isCustom: false, metric: def.metric, sets: sets };
+    });
+    return {
+      id: date, date: date, dayLabel: template.label, type: "workout", templateId: templateId,
+      templateSnapshot: L.snapshotTemplate(template), exercises: exercises, cardio: null, xpEarned: 0, completedAt: date
+    };
+  }
+
+  const snapshotState = L.freshState();
+  snapshotState.restDays = [0, 4];
+  const loggedDate = "2026-09-21"; // a Monday, upperA by default
+  snapshotState.sessions.push(buildSnapshottedSession(loggedDate, "upperA", snapshotState.templates.upperA, true));
+
+  check("isDayCompliant is true right after logging against the original template", L.isDayCompliant(snapshotState, new Date(loggedDate + "T09:00:00")));
+
+  // Edit the LIVE template to require a 6th exercise the session never logged.
+  snapshotState.templates.upperA = L.addExerciseToTemplate(snapshotState.templates.upperA, { name: "Face Pull", metric: "reps", loaded: true, targetSets: 3, targetReps: 15 });
+  check("editing the live template afterward does not retroactively break a past day's compliance", L.isDayCompliant(snapshotState, new Date(loggedDate + "T09:00:00")));
+
+  // Permanently reassigning the weekday to a different template shouldn't
+  // reinterpret this day's history either.
+  snapshotState.weekPlan[1] = "lower";
+  check("reassigning the weekday's template later does not reinterpret a past day's history", L.isDayCompliant(snapshotState, new Date(loggedDate + "T09:00:00")));
+
+  // A legacy session (recorded before this fix existed, so no templateId or
+  // templateSnapshot) has nothing to fall back on but the live plan --
+  // documented as unrecoverable, not a bug in the fix itself.
+  const legacyExercises = snapshotState.templates.lower.exercises.map(function (def) {
+    var sets = [];
+    for (var i = 0; i < def.targetSets; i++) sets.push({ reps: def.targetReps, weight: def.loaded ? 20 : 0, cadenceMs: null });
+    return { name: def.name, isCustom: false, metric: def.metric, sets: sets };
+  });
+  snapshotState.sessions.push({ id: "legacy", date: "2026-09-23", dayLabel: "Lower", type: "workout", exercises: legacyExercises, cardio: null, xpEarned: 0, completedAt: "2026-09-23" });
+  check("a legacy session with no snapshot falls back to resolving the live plan", L.isDayCompliant(snapshotState, new Date("2026-09-23T09:00:00")));
+
   /* ---- consistency / PRs / attributes ---- */
   const consistency = L.computeConsistency(streakState, fridayMorning, 30);
   check("consistency is a percentage between 0 and 100", consistency >= 0 && consistency <= 100);
@@ -330,6 +372,31 @@ function main() {
   check("countRecentPRs records the correct PR weights", prs[0].weight === 25 && prs[1].weight === 30);
   const prsWindowed = L.countRecentPRs(prSessions, "2026-08-11");
   check("countRecentPRs respects the since-date window", prsWindowed.length === 1 && prsWindowed[0].weight === 30);
+  check("countRecentPRs tags loaded PRs with type 'weight'", prs.every((pr) => pr.type === "weight"));
+
+  // Regression: bodyweight-only exercises (never logged with weight) must
+  // still be able to register a PR, via reps, or they'd never contribute
+  // to Strength no matter how much they improved.
+  const bodyweightPrSessions = [
+    { date: "2026-08-01", exercises: [{ name: "Push-Up", sets: [{ weight: 0, reps: 15 }] }] },
+    { date: "2026-08-08", exercises: [{ name: "Push-Up", sets: [{ weight: null, reps: 20 }] }] }, // rep PR
+    { date: "2026-08-15", exercises: [{ name: "Push-Up", sets: [{ weight: 0, reps: 18 }] }] },    // not a PR
+    { date: "2026-08-22", exercises: [{ name: "Push-Up", sets: [{ weight: 0, reps: 25 }] }] }     // rep PR
+  ];
+  const bwPrs = L.countRecentPRs(bodyweightPrSessions, "2026-08-02");
+  check("bodyweight exercises register rep PRs", bwPrs.length === 2);
+  check("bodyweight PRs are tagged type 'reps' with a reps field", bwPrs.every((pr) => pr.type === "reps" && typeof pr.reps === "number"));
+  check("bodyweight PR reps values are correct", bwPrs.map((pr) => pr.reps).join(",") === "20,25");
+
+  // A session with any weight logged is judged as loaded (weight axis);
+  // one with none is judged as bodyweight (reps axis) -- independent
+  // per-session, not a fixed property of the exercise name.
+  const mixedSessions = [
+    { date: "2026-08-01", exercises: [{ name: "Ring Row", sets: [{ weight: 0, reps: 10 }] }] },   // reps PR (bodyweight)
+    { date: "2026-08-08", exercises: [{ name: "Ring Row", sets: [{ weight: 10, reps: 10 }] }] }    // weight PR (now loaded)
+  ];
+  const mixedPrs = L.countRecentPRs(mixedSessions, "2026-08-01");
+  check("PR axis is judged per-session, not fixed per exercise", mixedPrs.length === 2 && mixedPrs[0].type === "reps" && mixedPrs[1].type === "weight");
 
   const attrs = L.computeAttributes(streakState, fridayMorning);
   check("attributes include strength/endurance/consistency", attrs.strength && attrs.endurance && attrs.consistency);
