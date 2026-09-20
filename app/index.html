@@ -249,6 +249,13 @@
   .weekplan-row{display:grid;grid-template-columns:70px 1fr;gap:10px;align-items:center;margin-bottom:8px;}
 
   textarea.digest{min-height:280px;font-size:12px;font-family:"SF Mono","Consolas",monospace;white-space:pre-wrap;}
+  textarea.plan-import{min-height:160px;font-size:13px;}
+
+  .plan-diff-block{border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:8px;}
+  .plan-diff-block .diff-title{font-weight:600;font-size:13px;margin-bottom:4px;}
+  .plan-diff-block .diff-line{font-size:12px;color:var(--text-dim);font-variant-numeric:tabular-nums;margin-top:2px;}
+  .plan-diff-block .diff-line.added{color:var(--accent);}
+  .plan-diff-block .diff-line.removed{color:var(--red);}
 
   .exercise-row{display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid var(--border);}
   .exercise-row:last-child{border-bottom:none;}
@@ -381,6 +388,8 @@
         <button class="btn block" data-action="import-data">Import JSON</button>
       </div>
       <button class="btn ghost block" data-action="open-digest">Generate AI Check-In Digest</button>
+      <div style="height:8px"></div>
+      <button class="btn ghost block" data-action="open-plan-import">Import Plan Changes</button>
       <input type="file" id="importFile" accept="application/json" style="display:none;">
     </div>
 
@@ -667,7 +676,13 @@
   function isDayCompliant(state, dateObj) {
     var weekday = dateObj.getDay();
     var dateKey = toDateKey(dateObj);
-    if (isRestDay(state.restDays, weekday)) return true;
+    var weekKey = weekStartKey(dateObj);
+    // A swap that week promotes an otherwise-rest day to a training day (see
+    // buildTodayViewModel) -- compliance has to agree with what the day
+    // actually showed, or a swapped-and-never-completed day would silently
+    // still count via the rest-day short-circuit.
+    var swappedThatWeek = !!(state.weekOverrides[weekKey] && Object.prototype.hasOwnProperty.call(state.weekOverrides[weekKey], weekday));
+    if (isRestDay(state.restDays, weekday) && !swappedThatWeek) return true;
 
     var session = (state.sessions || []).filter(function (s) { return s.date === dateKey; })[0];
     if (!session) return false;
@@ -815,6 +830,31 @@
       .map(function (entry) { return entry.name; });
   }
 
+  // An exercise has plateaued if its best value (weight, or reps/seconds for
+  // bodyweight) hasn't exceeded where it stood at the start of its last
+  // `windowSessions` logged sessions -- i.e. no net progress across that
+  // whole window, not just one off session. Needs at least that many
+  // sessions logged to say anything (no verdict on too little data).
+  function detectPlateaus(state, windowSessions) {
+    windowSessions = windowSessions || 3;
+    var names = listLoggedExercises(state);
+    var plateaus = [];
+    names.forEach(function (name) {
+      var history = buildExerciseHistory(state.sessions || [], name);
+      if (history.points.length < windowSessions) return;
+      var recent = history.points.slice(-windowSessions);
+      var values = recent.map(function (p) { return history.metric === "weight" ? p.bestWeight : p.bestReps; });
+      var maxInWindow = Math.max.apply(null, values);
+      if (maxInWindow <= values[0]) {
+        plateaus.push({
+          exercise: name, metric: history.metric, sessions: windowSessions,
+          value: values[0], lastDate: recent[recent.length - 1].date
+        });
+      }
+    });
+    return plateaus;
+  }
+
   /* ---------- schema / migration ---------- */
   function migrate(data) {
     if (!data || typeof data !== "object") return freshState();
@@ -954,15 +994,173 @@
     return t;
   }
 
+  /* ---------- plan-change import: parse / diff / apply a proposed patch ----
+     Expected shape (fenced ```json``` or bare JSON, from an AI's digest
+     response):
+       { "planChanges": {
+           "templates": { "<templateId>": { "exercises": [
+             { "name": "...", "metric": "reps"|"seconds", "loaded": bool,
+               "targetSets": n, "targetReps": n }, ... ] } },
+           "weekPlan": { "<weekday 0-6>": "<templateId>" } } }
+     Only EXISTING template ids can be edited this way -- no new templates
+     are created, matching what Settings' own editor already allows. Never
+     applied without the caller showing a diff and getting confirmation. ---- */
+  function extractJsonBlock(text) {
+    if (typeof text !== "string") return null;
+    var fenced = text.match(/```json\s*([\s\S]*?)```/i);
+    var candidate = fenced ? fenced[1] : text;
+    try {
+      return JSON.parse(candidate);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function sanitizeExerciseDef(raw) {
+    if (!raw || typeof raw.name !== "string" || !raw.name.trim()) return null;
+    return {
+      name: raw.name.trim(),
+      metric: raw.metric === "seconds" ? "seconds" : "reps",
+      loaded: raw.loaded !== false,
+      targetSets: Math.max(1, Math.round(Number(raw.targetSets)) || 0) || 1,
+      targetReps: Math.max(1, Math.round(Number(raw.targetReps)) || 0) || 1
+    };
+  }
+
+  function parsePlanChangePayload(text) {
+    var errors = [];
+    var parsed = extractJsonBlock(text);
+    if (!parsed || typeof parsed !== "object") {
+      return { valid: false, errors: ["Could not find valid JSON in that text."], payload: null };
+    }
+    var changes = parsed.planChanges || parsed; // tolerate a bare {templates,weekPlan} too
+    var templates = {};
+    var weekPlan = {};
+
+    if (changes.templates && typeof changes.templates === "object") {
+      Object.keys(changes.templates).forEach(function (templateId) {
+        if (TRAINING_TEMPLATE_IDS.indexOf(templateId) === -1) {
+          errors.push('Unknown template "' + templateId + '" — skipped. Only existing templates (' + TRAINING_TEMPLATE_IDS.join(", ") + ") can be edited this way.");
+          return;
+        }
+        var rawExercises = changes.templates[templateId] && changes.templates[templateId].exercises;
+        if (!Array.isArray(rawExercises)) {
+          errors.push('Template "' + templateId + '" has no exercises array — skipped.');
+          return;
+        }
+        var cleaned = rawExercises.map(sanitizeExerciseDef).filter(Boolean);
+        if (!cleaned.length) {
+          errors.push('Template "' + templateId + '" had no valid exercises after validation — skipped.');
+          return;
+        }
+        templates[templateId] = cleaned;
+      });
+    }
+
+    if (changes.weekPlan && typeof changes.weekPlan === "object") {
+      Object.keys(changes.weekPlan).forEach(function (dayKey) {
+        var day = Number(dayKey);
+        var templateId = changes.weekPlan[dayKey];
+        if (!(day >= 0 && day <= 6)) {
+          errors.push('Invalid weekday "' + dayKey + '" — skipped.');
+          return;
+        }
+        if (TRAINING_TEMPLATE_IDS.indexOf(templateId) === -1) {
+          errors.push('Unknown template "' + templateId + '" for ' + WEEKDAY_LABELS[day] + ' — skipped.');
+          return;
+        }
+        weekPlan[day] = templateId;
+      });
+    }
+
+    var hasAnything = Object.keys(templates).length > 0 || Object.keys(weekPlan).length > 0;
+    if (!hasAnything && !errors.length) {
+      errors.push("No template or weekly-plan changes found in that text.");
+    }
+
+    return {
+      valid: hasAnything,
+      errors: errors,
+      payload: hasAnything ? { templates: templates, weekPlan: weekPlan } : null
+    };
+  }
+
+  function diffPlanChanges(state, payload) {
+    var templates = getTemplates(state);
+    var changes = [];
+
+    Object.keys(payload.templates || {}).forEach(function (templateId) {
+      var oldTemplate = templates[templateId];
+      var newExercises = payload.templates[templateId];
+      var oldExercises = (oldTemplate && oldTemplate.exercises) || [];
+      var oldByName = {};
+      oldExercises.forEach(function (e) { oldByName[e.name] = e; });
+      var newByName = {};
+      newExercises.forEach(function (e) { newByName[e.name] = e; });
+
+      var lines = [];
+      newExercises.forEach(function (ne) {
+        var oe = oldByName[ne.name];
+        var newUnit = ne.metric === "seconds" ? "sec" : "reps";
+        if (!oe) {
+          lines.push("+ Added: " + ne.name + " (" + ne.targetSets + "×" + ne.targetReps + " " + newUnit + (ne.loaded ? "" : ", bodyweight") + ")");
+        } else if (oe.targetSets !== ne.targetSets || oe.targetReps !== ne.targetReps || oe.metric !== ne.metric || oe.loaded !== ne.loaded) {
+          var oldUnit = oe.metric === "seconds" ? "sec" : "reps";
+          lines.push(ne.name + ": " + oe.targetSets + "×" + oe.targetReps + " " + oldUnit + " → " + ne.targetSets + "×" + ne.targetReps + " " + newUnit);
+        }
+      });
+      oldExercises.forEach(function (oe) {
+        if (!newByName[oe.name]) lines.push("− Removed: " + oe.name);
+      });
+
+      changes.push({
+        type: "template", templateId: templateId, label: (oldTemplate && oldTemplate.label) || templateId,
+        lines: lines.length ? lines : ["No changes"]
+      });
+    });
+
+    Object.keys(payload.weekPlan || {}).forEach(function (dayKey) {
+      var day = Number(dayKey);
+      var newTemplateId = payload.weekPlan[dayKey];
+      var oldTemplateId = state.weekPlan[day];
+      if (oldTemplateId === newTemplateId) return;
+      changes.push({
+        type: "weekday", day: day, label: WEEKDAY_LABELS[day],
+        from: templates[oldTemplateId] ? templates[oldTemplateId].label : oldTemplateId,
+        to: templates[newTemplateId] ? templates[newTemplateId].label : newTemplateId
+      });
+    });
+
+    return changes;
+  }
+
+  function applyPlanChanges(state, payload) {
+    var next = Object.assign({}, state);
+    next.templates = Object.assign({}, state.templates);
+    Object.keys(payload.templates || {}).forEach(function (templateId) {
+      var oldTemplate = next.templates[templateId] || {};
+      next.templates[templateId] = Object.assign({}, oldTemplate, { exercises: payload.templates[templateId] });
+    });
+    next.weekPlan = Object.assign({}, state.weekPlan);
+    Object.keys(payload.weekPlan || {}).forEach(function (dayKey) {
+      next.weekPlan[Number(dayKey)] = payload.weekPlan[dayKey];
+    });
+    return next;
+  }
+
   /* ---------- view-model builders (pure; DOM layer consumes these) ---------- */
   function buildTodayViewModel(state, now) {
     now = now || new Date();
     var weekday = now.getDay();
     var weekKey = weekStartKey(now);
     var dateKey = toDateKey(now);
-    var rest = isRestDay(state.restDays, weekday);
     var templateId = resolvePlanDay(state.weekPlan, state.weekOverrides, weekKey, weekday);
     var swapped = !!(state.weekOverrides[weekKey] && Object.prototype.hasOwnProperty.call(state.weekOverrides[weekKey], weekday));
+    // A swap on an otherwise-rest day promotes it to a training day for this
+    // week -- "Swap this day" is offered on the rest-day screen itself, so
+    // it needs to actually take effect there, not just change which
+    // template would apply if the day weren't a rest day.
+    var rest = isRestDay(state.restDays, weekday) && !swapped;
     var templates = getTemplates(state);
     var template = templates[templateId];
 
@@ -976,11 +1174,11 @@
     var strip = [];
     for (var d = 0; d < 7; d++) {
       var tid = resolvePlanDay(state.weekPlan, state.weekOverrides, weekKey, d);
-      var dRest = isRestDay(state.restDays, d);
+      var dSwapped = !!(state.weekOverrides[weekKey] && Object.prototype.hasOwnProperty.call(state.weekOverrides[weekKey], d));
+      var dRest = isRestDay(state.restDays, d) && !dSwapped;
       var dDate = new Date(now);
       dDate.setDate(now.getDate() - weekday + d);
       var dKey = toDateKey(dDate);
-      var dSwapped = !!(state.weekOverrides[weekKey] && Object.prototype.hasOwnProperty.call(state.weekOverrides[weekKey], d));
       var dDone = state.sessions.some(function (s) { return s.date === dKey && s.exercises && s.exercises.length; });
       strip.push({
         weekday: d, label: WEEKDAY_LABELS[d], isToday: d === weekday, isRest: dRest,
@@ -1067,6 +1265,17 @@
       lines.push("- none logged");
     }
     lines.push("");
+    var plateaus = detectPlateaus(state);
+    lines.push("## Plateaued exercises (no net progress across the last 3 sessions)");
+    if (plateaus.length) {
+      plateaus.forEach(function (p) {
+        var unit = p.metric === "weight" ? "lb" : (state.exercises[p.exercise] && state.exercises[p.exercise].metric === "seconds" ? "sec" : "reps");
+        lines.push("- " + p.exercise + ": stuck at " + p.value + " " + unit + " as of " + p.lastDate);
+      });
+    } else {
+      lines.push("- none");
+    }
+    lines.push("");
     lines.push("## Current plan" + " (this week, including any swaps)");
     var templates = getTemplates(state);
     var digestWeekKey = weekStartKey(now);
@@ -1079,7 +1288,20 @@
     }
     lines.push("");
     lines.push("## Ask");
-    lines.push("Given the above, what should change in the next 1-2 weeks — exercise selection, volume, rest days, or pacing?");
+    lines.push("Given the above, what should change in the next 1-2 weeks — exercise selection, volume, rest days, or pacing? Pay particular attention to any plateaued exercises listed above.");
+    lines.push("");
+    lines.push("If you have concrete plan changes to propose (not just general advice), include them as a fenced json code block using exactly this shape, so they can be reviewed and imported directly in Settings → Import Plan Changes:");
+    lines.push("");
+    lines.push("```json");
+    lines.push(JSON.stringify({
+      planChanges: {
+        templates: { upperA: { exercises: [{ name: "Example Exercise", metric: "reps", loaded: true, targetSets: 4, targetReps: 10 }] } },
+        weekPlan: { "5": "cardio" }
+      }
+    }, null, 2));
+    lines.push("```");
+    lines.push("");
+    lines.push("Only include a template if you're changing it -- give its FULL exercise list (existing ones you're not changing plus your edits), since importing replaces that template's whole list. metric is \"reps\" or \"seconds\"; loaded is true/false. weekPlan keys are weekday numbers (0=Sun..6=Sat); only existing template ids (" + TRAINING_TEMPLATE_IDS.join(", ") + ") are valid. Omit the json block entirely if you have no concrete changes to propose.");
 
     return lines.join("\n");
   }
@@ -1133,7 +1355,11 @@
     buildExerciseViewModel: buildExerciseViewModel,
     buildDigest: buildDigest,
     buildExerciseHistory: buildExerciseHistory,
-    listLoggedExercises: listLoggedExercises
+    listLoggedExercises: listLoggedExercises,
+    detectPlateaus: detectPlateaus,
+    parsePlanChangePayload: parsePlanChangePayload,
+    diffPlanChanges: diffPlanChanges,
+    applyPlanChanges: applyPlanChanges
   };
 
   if (typeof module !== "undefined" && module.exports) {
@@ -1190,11 +1416,16 @@
     });
   }
 
+  // Deliberately holds no state of its own -- every save takes the current
+  // state explicitly. An earlier version cached it internally (Store.state,
+  // set once at load()), which silently went stale the moment the app-shell
+  // reassigned its own `state` variable to a new object (JSON import, plan-
+  // change apply) rather than mutating the existing one in place: the app
+  // would render correctly from the new object but persist the old one
+  // forever after, until reload quietly reverted "successfully imported"
+  // data. Passing state explicitly makes that class of bug impossible.
   var Store = {
-    state: null,
-
     load: function () {
-      var self = this;
       return idbGet("app")
         .catch(function () { return undefined; })
         .then(function (fromIdb) {
@@ -1205,19 +1436,17 @@
               if (lsRaw) raw = JSON.parse(lsRaw);
             } catch (e) { /* ignore corrupt mirror */ }
           }
-          self.state = TrainLogic.migrate(raw);
-          return self.persist();
-        })
-        .then(function () { return self.state; });
+          var migrated = TrainLogic.migrate(raw);
+          return Store.persist(migrated).then(function () { return migrated; });
+        });
     },
 
-    persist: function () {
-      var self = this;
-      try { localStorage.setItem(LS_KEY, JSON.stringify(self.state)); } catch (e) { /* quota / private mode */ }
-      return idbSet("app", self.state).catch(function () { /* idb unavailable — localStorage mirror still holds */ });
+    persist: function (currentState) {
+      try { localStorage.setItem(LS_KEY, JSON.stringify(currentState)); } catch (e) { /* quota / private mode */ }
+      return idbSet("app", currentState).catch(function () { /* idb unavailable — localStorage mirror still holds */ });
     },
 
-    save: function () { return this.persist(); }
+    save: function (currentState) { return this.persist(currentState); }
   };
 
   window.Store = Store;
@@ -1333,7 +1562,7 @@
   });
 
   function persistAndRerender() {
-    Store.save();
+    Store.save(state);
     render();
   }
 
@@ -1364,7 +1593,7 @@
     // after the synchronous Store.save() that triggered them has already
     // run -- without saving here too, that XP shows in the toast but never
     // reaches disk unless something else happens to save afterward.
-    Store.save();
+    Store.save(state);
     var toast = $("#xpToast");
     toast.textContent = "+" + amount + " XP" + (label ? " · " + label : "");
     toast.classList.add("show");
@@ -1695,6 +1924,9 @@
       case "open-digest": return openDigestModal();
       case "copy-digest": return copyDigest();
       case "download-digest": return downloadDigest();
+      case "open-plan-import": return openPlanImportModal();
+      case "preview-plan-changes": return previewPlanChanges();
+      case "apply-plan-changes": return applyPlanChangesConfirmed();
       case "open-exercise-detail": return openExerciseDetailModal(el.dataset.exercise);
       case "chart-point-tap": return updateChartReadout(el);
       default: return;
@@ -1742,7 +1974,7 @@
 
     debounce("set-" + exerciseName + "-" + setIdx, function () {
       maybeAutoCompleteExercise(session, exerciseName);
-      Store.save();
+      Store.save(state);
     }, 400);
   }
 
@@ -1885,7 +2117,7 @@
         var idx = Number(row.dataset.set);
         while (exEntry.sets.length <= idx) exEntry.sets.push({ reps: null, weight: null, cadenceMs: null });
         exEntry.sets[idx].cadenceMs = elapsed;
-        Store.save();
+        Store.save(state);
       }
       render();
     } else {
@@ -1971,7 +2203,7 @@
     var result = L.computeReadinessVerdict(input, state.baselines);
     var dateKey = L.toDateKey(viewDate);
     state.readiness[dateKey] = Object.assign({}, input, { verdict: result.verdict, score: result.score, checkedAt: new Date().toISOString() });
-    Store.save();
+    Store.save(state);
     $("#readinessResult").innerHTML =
       '<div class="row"><span class="pill ' + result.verdict.toLowerCase() + '">' + result.verdict + '</span>' +
       '<button class="btn ghost sm" data-action="open-readiness">Re-check</button></div>';
@@ -2012,7 +2244,7 @@
       vm.todaySession.templateSnapshot = newTemplate ? L.snapshotTemplate(newTemplate) : null;
     }
 
-    Store.save();
+    Store.save(state);
     closeModal();
     render();
   }
@@ -2087,7 +2319,7 @@
       for (var i = 0; i < numSets; i++) sets.push({ reps: null, weight: null, cadenceMs: null });
       session.exercises.push({ name: name, isCustom: true, metric: metric, loaded: loaded, sets: sets });
     }
-    Store.save();
+    Store.save(state);
     closeModal();
     render();
   }
@@ -2227,7 +2459,7 @@
   }
 
   function persistAndRerenderSettingsOnly() {
-    Store.save();
+    Store.save(state);
     renderTemplateEditor();
     renderWeekPlanEditor();
   }
@@ -2303,6 +2535,67 @@
     a.click();
     document.body.removeChild(a);
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  /* ---------- plan-change import ---------- */
+  var pendingPlanChangePayload = null;
+
+  function openPlanImportModal() {
+    pendingPlanChangePayload = null;
+    var body =
+      '<div class="modal-grip"></div>' +
+      '<div class="modal-head"><h2>Import Plan Changes</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
+      '<div class="muted" style="margin-bottom:10px;">Paste an AI’s response — the whole thing is fine, the JSON block gets found automatically. Nothing changes until you review the diff and confirm.</div>' +
+      '<textarea class="plan-import" id="planImportText" placeholder="Paste the AI’s response here…"></textarea>' +
+      '<div style="height:10px"></div>' +
+      '<button class="btn primary block" data-action="preview-plan-changes">Preview Changes</button>' +
+      '<div id="planImportPreview" style="margin-top:12px;"></div>';
+    openModal(body);
+  }
+
+  function previewPlanChanges() {
+    var text = $("#planImportText").value;
+    var result = L.parsePlanChangePayload(text);
+    var preview = $("#planImportPreview");
+    pendingPlanChangePayload = null;
+
+    if (!result.valid) {
+      preview.innerHTML = '<div class="banner danger">' + result.errors.map(esc).join("<br>") + "</div>";
+      return;
+    }
+
+    var diff = L.diffPlanChanges(state, result.payload);
+    var warningHtml = result.errors.length ? '<div class="banner">' + result.errors.map(esc).join("<br>") + "</div>" : "";
+
+    if (!diff.length) {
+      preview.innerHTML = warningHtml + '<div class="empty">No changes — already matches your current plan.</div>';
+      return;
+    }
+
+    var diffHtml = diff.map(function (d) {
+      if (d.type === "weekday") {
+        return '<div class="plan-diff-block"><div class="diff-title">' + esc(d.label) + '</div>' +
+          '<div class="diff-line">' + esc(d.from) + " → " + esc(d.to) + "</div></div>";
+      }
+      var lines = d.lines.map(function (l) {
+        var cls = l.indexOf("+ Added") === 0 ? "added" : (l.indexOf("− Removed") === 0 ? "removed" : "");
+        return '<div class="diff-line ' + cls + '">' + esc(l) + "</div>";
+      }).join("");
+      return '<div class="plan-diff-block"><div class="diff-title">' + esc(d.label) + "</div>" + lines + "</div>";
+    }).join("");
+
+    pendingPlanChangePayload = result.payload;
+    preview.innerHTML = warningHtml + diffHtml +
+      '<button class="btn primary block" style="margin-top:6px;" data-action="apply-plan-changes">Apply Changes</button>';
+  }
+
+  function applyPlanChangesConfirmed() {
+    if (!pendingPlanChangePayload) return;
+    state = L.applyPlanChanges(state, pendingPlanChangePayload);
+    pendingPlanChangePayload = null;
+    Store.save(state);
+    closeModal();
+    render();
   }
 
   /* ---------- exercise history (progress trend) ---------- */

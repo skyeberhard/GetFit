@@ -284,6 +284,24 @@ function main() {
   check("isDayCompliant: rest day is always compliant with no session", L.isDayCompliant(streakState, new Date("2026-09-24T09:00:00"))); // Thu, rest
   check("isDayCompliant: training day with no session is not compliant", !L.isDayCompliant(streakState, new Date("2026-09-21T09:00:00"))); // Mon, upperA, no session yet
 
+  // Regression: "Swap this day" is offered on the rest-day screen itself, so
+  // swapping a rest day to a training template must actually take effect --
+  // not silently stay a rest day while offering a workout nobody can reach.
+  const swapRestDayState = L.freshState();
+  swapRestDayState.restDays = [0, 4];
+  const thuDate = new Date("2026-09-24T09:00:00"); // Thu, a rest day by default
+  const thuWeekKey = L.weekStartKey(thuDate);
+  swapRestDayState.weekOverrides[thuWeekKey] = { 4: "upperA" };
+
+  const thuVm = L.buildTodayViewModel(swapRestDayState, thuDate);
+  check("swapping a rest day to a training template un-rests it in the view-model", thuVm.isRest === false);
+  check("swapped rest day resolves to the swapped template", thuVm.templateId === "upperA");
+  check("a swapped rest day with nothing logged is not auto-compliant", !L.isDayCompliant(swapRestDayState, thuDate));
+
+  swapRestDayState.sessions.push(buildCompleteWorkoutSession("2026-09-24", swapRestDayState.templates.upperA));
+  check("a swapped rest day IS compliant once the swapped workout is actually completed", L.isDayCompliant(swapRestDayState, thuDate));
+  check("an un-swapped rest day in the same fixture is still automatically compliant", L.isDayCompliant(swapRestDayState, new Date("2026-09-20T09:00:00"))); // Sun, no override
+
   streakState.sessions.push(buildCompleteWorkoutSession("2026-09-21", templates.upperA)); // Mon
   streakState.sessions.push(buildCardioSession("2026-09-22", 30));                        // Tue
   streakState.sessions.push(buildCompleteWorkoutSession("2026-09-23", templates.lower));  // Wed
@@ -421,6 +439,8 @@ function main() {
   check("digest is a non-empty string", typeof digest === "string" && digest.length > 100);
   check("digest includes the streak snapshot", digest.indexOf("Current streak") !== -1);
   check("digest includes a PR section", digest.indexOf("PRs in the last 30 days") !== -1);
+  check("digest includes a plateaued-exercises section", digest.indexOf("Plateaued exercises") !== -1);
+  check("digest includes the plan-change JSON schema instructions", digest.indexOf("Import Plan Changes") !== -1 && digest.indexOf("```json") !== -1);
 
   // Regression: the digest's "Current plan" must reflect an active
   // this-week swap, not just the permanent weekPlan -- otherwise an AI
@@ -432,6 +452,74 @@ function main() {
   const swapDigest = L.buildDigest(swapDigestState, fridayMorning);
   check("digest reflects an active this-week swap rather than the permanent plan", swapDigest.indexOf("Fri: Cardio (swapped this week)") !== -1);
   check("digest does not show the pre-swap permanent assignment for a swapped day", swapDigest.indexOf("Fri: Upper Body — Accessory") === -1);
+
+  /* ---- plateau detection ---- */
+  const plateauState = L.freshState();
+  const plateauSessions = [
+    { date: "2026-08-01", exercises: [{ name: "Goblet Squat", sets: [{ reps: 10, weight: 20 }] }, { name: "Push-Up", sets: [{ reps: 15, weight: 0 }] }] },
+    { date: "2026-08-08", exercises: [{ name: "Goblet Squat", sets: [{ reps: 10, weight: 20 }] }, { name: "Push-Up", sets: [{ reps: 18, weight: 0 }] }] },
+    { date: "2026-08-15", exercises: [{ name: "Goblet Squat", sets: [{ reps: 10, weight: 20 }] }, { name: "Push-Up", sets: [{ reps: 20, weight: 0 }] }] }
+  ];
+  plateauState.sessions = plateauSessions;
+  plateauState.exercises = {
+    "Goblet Squat": { name: "Goblet Squat", lastReps: 10, lastWeight: 20, bestWeight: 20, bestReps: 10, metric: "reps", loaded: true, updatedAt: "2026-08-15T00:00:00.000Z" },
+    "Push-Up": { name: "Push-Up", lastReps: 20, lastWeight: 0, bestWeight: 0, bestReps: 20, metric: "reps", loaded: false, updatedAt: "2026-08-15T00:00:00.000Z" }
+  };
+  const plateaus = L.detectPlateaus(plateauState, 3);
+  check("detectPlateaus flags an exercise with no net progress across the window", plateaus.some((p) => p.exercise === "Goblet Squat"));
+  check("detectPlateaus does not flag an exercise that's still improving", !plateaus.some((p) => p.exercise === "Push-Up"));
+  const tooFewSessions = L.detectPlateaus(Object.assign({}, plateauState, { sessions: [plateauSessions[0]] }), 3);
+  check("detectPlateaus says nothing when there's too little history", tooFewSessions.length === 0);
+
+  /* ---- plan-change import: parse ---- */
+  const validPayloadText = "Here's my advice...\n```json\n" + JSON.stringify({
+    planChanges: {
+      templates: { upperA: { exercises: [
+        { name: "Pull-Up", metric: "reps", loaded: true, targetSets: 4, targetReps: 10 },
+        { name: "Face Pull", metric: "reps", loaded: true, targetSets: 3, targetReps: 15 }
+      ] } },
+      weekPlan: { "5": "cardio" }
+    }
+  }) + "\n```\nHope that helps!";
+  const parsedValid = L.parsePlanChangePayload(validPayloadText);
+  check("parsePlanChangePayload extracts a fenced JSON block from surrounding prose", parsedValid.valid === true);
+  check("parsePlanChangePayload keeps a valid template's exercises", parsedValid.payload.templates.upperA.length === 2);
+  check("parsePlanChangePayload keeps a valid weekPlan entry", parsedValid.payload.weekPlan[5] === "cardio");
+
+  const unknownTemplateText = "```json\n" + JSON.stringify({ planChanges: { templates: { madeUpTemplate: { exercises: [{ name: "X", targetSets: 3, targetReps: 10 }] } } } }) + "\n```";
+  const parsedUnknown = L.parsePlanChangePayload(unknownTemplateText);
+  check("parsePlanChangePayload rejects an unknown template id with an error, not a crash", parsedUnknown.valid === false && parsedUnknown.errors.length > 0);
+
+  const garbageText = "not json at all, just some advice about training harder";
+  const parsedGarbage = L.parsePlanChangePayload(garbageText);
+  check("parsePlanChangePayload fails cleanly on text with no JSON", parsedGarbage.valid === false);
+
+  const floorText = "```json\n" + JSON.stringify({ planChanges: { templates: { upperA: { exercises: [{ name: "Bad Sets", targetSets: 0, targetReps: -5 }] } } } }) + "\n```";
+  const parsedFloor = L.parsePlanChangePayload(floorText);
+  check("parsePlanChangePayload floors invalid targetSets/targetReps at 1", parsedFloor.payload.templates.upperA[0].targetSets === 1 && parsedFloor.payload.templates.upperA[0].targetReps === 1);
+
+  /* ---- plan-change import: diff + apply ---- */
+  const diffState = L.freshState();
+  const diffPayload = {
+    templates: {
+      upperA: diffState.templates.upperA.exercises.map(function (e, i) {
+        return i === 0 ? Object.assign({}, e, { targetSets: e.targetSets + 1 }) : e;
+      }).concat([{ name: "Face Pull", metric: "reps", loaded: true, targetSets: 3, targetReps: 15 }])
+    },
+    weekPlan: { 5: "cardio" }
+  };
+  const diffResult = L.diffPlanChanges(diffState, diffPayload);
+  const templateDiff = diffResult.filter((d) => d.type === "template" && d.templateId === "upperA")[0];
+  check("diffPlanChanges reports an added exercise", templateDiff.lines.some((l) => l.indexOf("+ Added: Face Pull") === 0));
+  check("diffPlanChanges reports a changed target", templateDiff.lines.some((l) => l.indexOf("→") !== -1));
+  const weekdayDiff = diffResult.filter((d) => d.type === "weekday" && d.day === 5)[0];
+  check("diffPlanChanges reports a weekday reassignment", !!weekdayDiff && weekdayDiff.to === "Cardio");
+
+  const appliedState = L.applyPlanChanges(diffState, diffPayload);
+  check("applyPlanChanges updates the named template's exercises", appliedState.templates.upperA.exercises.length === diffState.templates.upperA.exercises.length + 1);
+  check("applyPlanChanges updates weekPlan for the named day", appliedState.weekPlan[5] === "cardio");
+  check("applyPlanChanges does not mutate the original state", diffState.templates.upperA.exercises.length === 5);
+  check("applyPlanChanges leaves other templates untouched", appliedState.templates.lower === diffState.templates.lower);
 
   /* ---- exercise history (progress trend view) ---- */
   const exHistSessions = [

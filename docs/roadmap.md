@@ -30,6 +30,11 @@
   - **Import had no confirmation.** Picking a file immediately replaced all current state — given the entire reason this app was rebuilt was losing data, a one-line `confirm()` before overwriting was cheap, obvious insurance.
   - **The AI digest ignored this-week swaps.** Its "Current plan" section read `state.weekPlan` directly instead of resolving through `weekOverrides`, so a swapped day was reported to an AI reviewer as if the swap never happened. Now resolves the actual current week's plan and marks swapped days.
   - Explicitly not done this round: mid-typing focus loss on rapid cross-set edits (real, but needs a focus-preservation mechanism across re-renders — bigger than a one-line fix), an export-reminder banner, memoizing `computeStreakInfo` per render, `inputmode` consistency on non-set-row number inputs, and pruning the unused `session.type` field — all lower value or premature without real usage data yet.
+- [x] **Plateau detection + a structured plan-change import**, closing the loop the AI digest started:
+  - The digest now includes a "Plateaued exercises" section (`detectPlateaus` — no net progress across the last 3 logged sessions, weight-axis or reps/seconds-axis per exercise same as PR detection) and asks the AI to name concrete changes rather than general advice.
+  - If the AI has concrete changes, the digest asks for them as a fenced `json` code block in a documented shape (which templates to edit, full exercise lists, weekday reassignments). Settings → **Import Plan Changes** lets you paste the whole response back in — the JSON is found and extracted automatically. Deliberately *not* a live API loop (same reasoning as the digest itself: no safe place to hold credentials in a static file, and a human should stay the one deciding what changes in their own program, not have an AI silently rewrite it). Preview-before-apply is non-negotiable: pasting shows a plain-language diff ("Pull-Up: 4×8 → 4×10", "Fri: Upper Body Accessory → Cardio") and nothing touches the plan until Apply is tapped. Scoped to only what Settings' own editor already allows changing (a template's exercises, weekday→template assignment) — no new templates, no touching sessions/history/XP/readiness.
+  - Surfaced and fixed a real, pre-existing bug while building this: `Store` cached its own copy of state, set once at load and never updated again, so any code path that *reassigned* `state` to a new object (JSON import, this new plan-change apply) rendered correctly on screen but silently persisted the stale pre-change data — reload and the "successful" import or apply would quietly revert. Fixed by having `Store.save`/`persist` take the current state explicitly rather than trusting an internal copy, which makes the whole bug class impossible rather than patching the two call sites that happened to trigger it.
+  - Also surfaced and fixed: "Swap this day" is offered on the rest-day screen itself, but swapping a rest day to a training template didn't actually un-rest it — the rest-day branch in `buildTodayViewModel` and `isDayCompliant` short-circuited regardless of any swap, so the swap silently did nothing. A swap now correctly promotes that day to a training day for the week, and compliance requires actually completing it rather than auto-passing.
 
 ## Explicitly deferred (flagged as scope creep for this app)
 
@@ -38,7 +43,7 @@
 ## Next
 
 - [ ] PWA manifest + service worker for installability and offline caching
-- [ ] Deload weeks / plateau detection (e.g. auto-suggest a deload after N stalled sessions on an exercise)
+- [ ] Deload weeks (plateau detection itself is done — see above; auto-suggesting a deload week in response is still open)
 
 ## Later / under consideration
 
@@ -48,6 +53,6 @@
 ## Validation
 
 - `node --check` runs against every inline `<script>` block via `scripts/test-harness.js`
-- The pure logic/view-model layer (`TrainLogic`, embedded in `app/index.html`) is dual-exported (CommonJS in Node, `window` in browser) so the harness can unit-test readiness scoring, progression suggestions, XP/leveling, streaks, PR detection (both weight- and reps-axis), attributes, rest-day validation, template editing, template-snapshot compliance, and schema migration without a browser
+- The pure logic/view-model layer (`TrainLogic`, embedded in `app/index.html`) is dual-exported (CommonJS in Node, `window` in browser) so the harness can unit-test readiness scoring, progression suggestions, XP/leveling, streaks, PR detection (both weight- and reps-axis), attributes, plateau detection, plan-change parse/diff/apply, rest-day validation, template editing, template-snapshot compliance, swap-vs-rest-day interaction, and schema migration without a browser
 - Schema migration is tested as a chain: reconstructed v0 (legacy) → v1 → v2 → current (v3), per the "test migrations against real saved data" principle
 - Run `node scripts/test-harness.js` before considering any change to `app/index.html` done
