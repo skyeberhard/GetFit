@@ -37,9 +37,14 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@v5
         with:
-          # This repo has no Pages site yet -- auto-create one with its
-          # build source set to "GitHub Actions" instead of requiring a
-          # manual Settings -> Pages click first.
+          # enablement: true asks this step to auto-create the Pages site
+          # if none exists yet. In practice the default GITHUB_TOKEN this
+          # workflow runs with isn't allowed to CREATE one (only update an
+          # existing one) -- creating the site the first time still needs
+          # one manual step: repo Settings -> Pages -> Build and
+          # deployment -> Source -> "GitHub Actions". Every run after that
+          # one-time click (including this workflow re-running on its own)
+          # deploys with no further action needed.
           enablement: true
       - name: Upload app/ as the Pages artifact
         uses: actions/upload-pages-artifact@v3
