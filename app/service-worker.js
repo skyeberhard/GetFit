@@ -16,10 +16,23 @@
    fetch still runs in the background to refresh the cache for
    next time. There is nothing else to fetch -- no API, no CDN
    fonts/scripts, no third-party requests.
+
+   Update flow: the browser byte-diffs this file against whatever's
+   currently installed on every registration.update() call (index.html
+   makes one whenever the app returns to the foreground) -- ANY change
+   to this file is enough to be noticed, CACHE_NAME included or not.
+   skipWaiting()/clients.claim() below mean a detected update activates
+   itself immediately rather than waiting for every open tab to close;
+   index.html listens for that and shows an in-app "Update available"
+   banner rather than silently swapping files out from under an open
+   screen. Bump CACHE_NAME on any release that changes which files
+   belong in the cache (or just to force a clean re-fetch of
+   everything) -- the activate handler below deletes any cache that
+   doesn't match the current name.
    ============================================================ */
 "use strict";
 
-var CACHE_NAME = "train-cache-v1";
+var CACHE_NAME = "train-cache-v2";
 var APP_SHELL = [
   "./",
   "./index.html",

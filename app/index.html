@@ -194,6 +194,18 @@
   }
   .xp-toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
 
+  .update-banner{
+    display:none;position:fixed;left:0;right:0;top:0;z-index:70;
+    align-items:center;justify-content:space-between;gap:10px;
+    background:var(--accent);color:var(--accent-text);
+    padding:10px 14px;padding-top:calc(10px + env(safe-area-inset-top));
+    font-size:13px;font-weight:600;box-shadow:var(--shadow-md);
+  }
+  .update-banner.show{display:flex;}
+  .update-banner .actions{display:flex;align-items:center;gap:6px;flex-shrink:0;}
+  .update-banner button{background:rgba(255,255,255,0.2);color:inherit;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;}
+  .update-banner button.dismiss{background:none;padding:6px;font-size:15px;line-height:1;opacity:0.85;}
+
   .modal-backdrop{
     display:none;position:fixed;inset:0;background:rgba(20,20,18,0.45);z-index:50;
     align-items:flex-end;justify-content:center;
@@ -435,6 +447,14 @@
     Settings
   </button>
 </nav>
+
+<div class="update-banner" id="updateBanner">
+  <span>Update available</span>
+  <div class="actions">
+    <button data-action="reload-app">Reload</button>
+    <button class="dismiss" data-action="dismiss-update-banner" aria-label="Dismiss">✕</button>
+  </div>
+</div>
 
 <div class="xp-toast" id="xpToast"></div>
 
@@ -1941,7 +1961,41 @@
   function registerServiceWorker() {
     if (location.protocol === "file:") return;
     if (!("serviceWorker" in navigator)) return;
-    navigator.serviceWorker.register("service-worker.js").catch(function () { /* best-effort */ });
+    // Whether THIS page load was already under an active service worker's
+    // control -- i.e. whether this is a genuine update to an existing
+    // install, not the very first registration ever (which also fires the
+    // same install/activate sequence below, but has nothing to "update
+    // from" and shouldn't prompt a reload).
+    var hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.register("service-worker.js").then(function (registration) {
+      registration.addEventListener("updatefound", function () {
+        var newWorker = registration.installing;
+        if (!newWorker) return;
+        newWorker.addEventListener("statechange", function () {
+          if (newWorker.state === "activated" && hadController) showUpdateBanner();
+        });
+      });
+      // A workout app can sit open/backgrounded for a long time -- check
+      // for a newer service worker whenever it's brought back to the
+      // foreground rather than waiting on the browser's own much slower
+      // periodic check.
+      document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "visible") registration.update().catch(function () { /* best-effort */ });
+      });
+    }).catch(function () { /* best-effort */ });
+  }
+
+  // The new service worker is already active (it calls skipWaiting() +
+  // clients.claim() on its own) by the time this shows -- reloading is
+  // just picking up the files it's already serving, not waiting on
+  // anything further.
+  function showUpdateBanner() {
+    var el = $("#updateBanner");
+    if (el) el.classList.add("show");
+  }
+  function dismissUpdateBanner() {
+    var el = $("#updateBanner");
+    if (el) el.classList.remove("show");
   }
 
   // Persists the real historical peak, not just today's current streak --
@@ -2385,6 +2439,8 @@
       case "open-digest": return openDigestModal();
       case "copy-digest": return copyDigest();
       case "download-digest": return downloadDigest();
+      case "reload-app": return location.reload();
+      case "dismiss-update-banner": return dismissUpdateBanner();
       case "open-plan-import": return openPlanImportModal();
       case "preview-plan-changes": return previewPlanChanges();
       case "apply-plan-changes": return applyPlanChangesConfirmed();
