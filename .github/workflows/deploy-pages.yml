@@ -36,6 +36,11 @@ jobs:
         uses: actions/checkout@v4
       - name: Configure Pages
         uses: actions/configure-pages@v5
+        with:
+          # This repo has no Pages site yet -- auto-create one with its
+          # build source set to "GitHub Actions" instead of requiring a
+          # manual Settings -> Pages click first.
+          enablement: true
       - name: Upload app/ as the Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
