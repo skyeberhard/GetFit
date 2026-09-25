@@ -300,6 +300,7 @@
       <div class="week-nav-label" id="weekRangeLabel"></div>
       <button class="icon-btn" data-action="next-week" aria-label="Next week">›</button>
     </div>
+    <div id="deloadRow"></div>
     <div class="day-strip-row">
       <div class="day-strip" id="dayStrip"></div>
       <button class="btn ghost sm" id="jumpToTodayBtn" data-action="jump-to-today" style="display:none;flex-shrink:0;">Today</button>
@@ -438,7 +439,7 @@
 (function (root) {
   "use strict";
 
-  var SCHEMA_VERSION = 4;
+  var SCHEMA_VERSION = 5;
 
   var WEEKDAY_LABELS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 
@@ -574,6 +575,27 @@
     return null;
   }
 
+  // The deload counterpart to nextOwnedWeight: the heaviest owned weight
+  // at or below targetWeight. Returns null with no owned-weights list
+  // configured.
+  function prevOwnedWeight(targetWeight, ownedWeights) {
+    if (!ownedWeights || !ownedWeights.length) return null;
+    var sorted = ownedWeights.slice().sort(function (a, b) { return a - b; });
+    var best = null;
+    for (var i = 0; i < sorted.length; i++) {
+      if (sorted[i] <= targetWeight) best = sorted[i];
+    }
+    return best;
+  }
+
+  // Whether the given week has been marked a deload week (see
+  // state.deloadWeeks, toggled from the Today tab) -- a program-wide,
+  // explicit decision to back off for the whole week, independent of any
+  // single exercise's own recent history.
+  function isDeloadWeekActive(state, weekKey) {
+    return !!(state && state.deloadWeeks && state.deloadWeeks[weekKey]);
+  }
+
   // Rep-range progression: build reps up through the exercise's rep range
   // at the same weight before adding load, and when weight does go up,
   // snap to a weight the user actually owns (rather than an arbitrary 5%
@@ -586,7 +608,24 @@
   // day (weight or reps) regardless of what the numbers say -- readiness
   // is a same-day override, not a replacement for the underlying
   // progression scheme.
-  function suggestProgression(exerciseDef, lastPerf, readinessVerdict, ownedWeights) {
+  //
+  // Two things trigger a genuine backing-off rather than just holding at
+  // the same number: an explicit deload week (isDeloadWeek -- program-
+  // wide, set regardless of this exercise's own history, and applies even
+  // on a session that just hit target) or two-plus consecutive missed
+  // sessions on this exercise specifically (consecutiveMisses -- repeating
+  // the same failed weight a third time in a row clearly isn't the fix).
+  // Either wins over readiness holding and normal progression.
+  //
+  // consecutiveMisses is trusted on its own here, not re-derived from
+  // hitFloor -- for a custom exercise, suggestCustomProgression builds
+  // lastPerf.reps and its target from the SAME catalog field
+  // (catalogEntry.lastReps), so hitFloor is always true there by
+  // construction and could never confirm a miss on its own. The catalog's
+  // missStreak (see updateExerciseCatalog) is computed against the target
+  // that was actually live *at the time*, which is the only place a
+  // custom exercise's miss is knowable at all.
+  function suggestProgression(exerciseDef, lastPerf, readinessVerdict, ownedWeights, consecutiveMisses, isDeloadWeek) {
     if (!lastPerf) {
       return { weight: 0, reps: exerciseDef.targetReps, note: "no history" };
     }
@@ -594,6 +633,23 @@
     var repCeiling = repRangeCeiling(exerciseDef);
     var hitFloor = lastPerf.reps >= (lastPerf.targetReps || repFloor);
     var holdBack = readinessVerdict === "HOLD" || readinessVerdict === "RECOVERY";
+    var misses = consecutiveMisses || 0;
+
+    if (isDeloadWeek || misses >= 2) {
+      if (exerciseDef.loaded && lastPerf.weight > 0) {
+        var target = lastPerf.weight * 0.9;
+        var snapped = prevOwnedWeight(target, ownedWeights);
+        var deloadWeight = snapped != null ? snapped : Math.max(2.5, Math.floor(target / 2.5) * 2.5);
+        // A snap-down (or the plain 10% cut) that lands back at or above
+        // the current weight isn't a cut at all -- force a real step down.
+        if (deloadWeight >= lastPerf.weight) deloadWeight = Math.max(2.5, round2(lastPerf.weight - 2.5));
+        return { weight: round2(deloadWeight), reps: repFloor, note: isDeloadWeek ? "deload week" : "deload -10%" };
+      }
+      // Unloaded (or a loaded exercise with no weight logged yet) has no
+      // weight to cut -- back off on reps instead.
+      var lighterReps = Math.max(1, Math.round(repFloor * 0.8));
+      return { weight: lastPerf.weight || 0, reps: lighterReps, note: isDeloadWeek ? "deload week" : "deload -20% reps" };
+    }
 
     if (exerciseDef.loaded) {
       if (!hitFloor || holdBack) {
@@ -627,13 +683,13 @@
   // own last performance, so this always resolves to a progress suggestion
   // (never "no history" once logged once). Returns the same shape as
   // suggestProgression with a note of "no history" when never logged.
-  function suggestCustomProgression(catalogEntry, readinessVerdict, ownedWeights) {
+  function suggestCustomProgression(catalogEntry, readinessVerdict, ownedWeights, isDeloadWeek) {
     if (!catalogEntry || !catalogEntry.lastReps) {
       return { weight: 0, reps: 0, note: "no history" };
     }
     var def = { loaded: !!catalogEntry.loaded, targetReps: catalogEntry.lastReps };
     var lastPerf = { weight: catalogEntry.lastWeight || 0, reps: catalogEntry.lastReps, targetReps: catalogEntry.lastReps };
-    return suggestProgression(def, lastPerf, readinessVerdict, ownedWeights);
+    return suggestProgression(def, lastPerf, readinessVerdict, ownedWeights, catalogEntry.missStreak || 0, isDeloadWeek);
   }
 
   /* ---------- set completion ---------- */
@@ -1025,6 +1081,10 @@
       state = migrateV3ToV4(state);
       version = 4;
     }
+    if (version === 4) {
+      state = migrateV4ToV5(state);
+      version = 5;
+    }
     state.schemaVersion = SCHEMA_VERSION;
     return state;
   }
@@ -1115,6 +1175,29 @@
     return next;
   }
 
+  // Adds `missStreak` (consecutive sessions in a row that missed target,
+  // tracked per exercise -- see updateExerciseCatalog) so suggestProgression
+  // can offer an actual deload instead of asking for the same failed
+  // weight forever, and `deloadWeeks` (a weekStartKey -> true map for
+  // program-wide deload weeks, toggled from the Today tab). missStreak
+  // starts at 0 for existing catalog entries rather than being
+  // reconstructed from history -- doing that correctly would need to know
+  // what target each past session was actually judged against, which
+  // depended on whichever template was live at the time and isn't
+  // reliably recoverable now. Starting at 0 just means an account with a
+  // genuine ongoing miss streak gets one fresh look before a deload is
+  // suggested again, which is a reasonable place to restart from.
+  function migrateV4ToV5(state) {
+    var next = Object.assign({}, state);
+    var exercises = {};
+    Object.keys(next.exercises || {}).forEach(function (name) {
+      exercises[name] = Object.assign({ missStreak: 0 }, next.exercises[name]);
+    });
+    next.exercises = exercises;
+    if (!next.deloadWeeks || typeof next.deloadWeeks !== "object") next.deloadWeeks = {};
+    return next;
+  }
+
   function cloneTemplates(templates) {
     return JSON.parse(JSON.stringify(templates));
   }
@@ -1146,6 +1229,7 @@
     state.templates = cloneTemplates(WORKOUT_TEMPLATES);
     state.longestStreak = 0;
     state.ownedWeights = [];
+    state.deloadWeeks = {};
     return state;
   }
 
@@ -1370,23 +1454,24 @@
 
     var restValidation = validateRestDays(state.restDays);
     var streak = computeStreakInfo(state, now);
+    var isDeload = isDeloadWeekActive(state, weekKey);
 
     return {
       dateKey: dateKey, weekKey: weekKey, weekday: weekday,
       isRest: rest, templateId: templateId, template: template, swapped: swapped,
       todaySession: todaySession, readinessToday: readinessToday,
-      dayStrip: strip, restValidation: restValidation, streak: streak
+      dayStrip: strip, restValidation: restValidation, streak: streak, isDeload: isDeload
     };
   }
 
-  function buildExerciseViewModel(exerciseDef, session, exerciseCatalog, readinessVerdict, ownedWeights) {
+  function buildExerciseViewModel(exerciseDef, session, exerciseCatalog, readinessVerdict, ownedWeights, isDeloadWeek) {
     var existing = session && session.exercises ? session.exercises.filter(function (e) { return e.name === exerciseDef.name; })[0] : null;
     var sets = existing ? existing.sets.slice() : [];
     while (sets.length < exerciseDef.targetSets) sets.push({ reps: null, weight: null, cadenceMs: null });
 
     var catalogEntry = exerciseCatalog ? exerciseCatalog[exerciseDef.name] : null;
     var lastPerf = catalogEntry ? { weight: catalogEntry.lastWeight, reps: catalogEntry.lastReps, targetReps: exerciseDef.targetReps } : null;
-    var suggestion = suggestProgression(exerciseDef, lastPerf, readinessVerdict, ownedWeights);
+    var suggestion = suggestProgression(exerciseDef, lastPerf, readinessVerdict, ownedWeights, catalogEntry ? (catalogEntry.missStreak || 0) : 0, isDeloadWeek);
     var complete = allSetsComplete(sets, exerciseDef.targetSets);
 
     return { def: exerciseDef, sets: sets, suggestion: suggestion, complete: complete };
@@ -1457,9 +1542,20 @@
       lines.push("- none");
     }
     lines.push("");
+    var digestWeekKey = weekStartKey(now);
+    var digestIsDeload = isDeloadWeekActive(state, digestWeekKey);
+    var strugglingExercises = Object.keys(state.exercises || {}).filter(function (name) { return (state.exercises[name].missStreak || 0) >= 2; });
+    lines.push("## Deload status");
+    lines.push("- This week is " + (digestIsDeload ? "" : "NOT ") + "currently marked a deload week.");
+    if (strugglingExercises.length) {
+      lines.push("- Exercises on a 2+ session miss streak (already getting an automatic lighter weight/reps suggestion in-app): " + strugglingExercises.join(", "));
+    }
+    if (!digestIsDeload && (plateaus.length >= 2 || strugglingExercises.length >= 2)) {
+      lines.push("- Worth considering a deload week given the above -- toggled from the Today tab (\"Deload This Week\"), not something the plan-change import below can set.");
+    }
+    lines.push("");
     lines.push("## Current plan" + " (this week, including any swaps)");
     var templates = getTemplates(state);
-    var digestWeekKey = weekStartKey(now);
     for (var d = 0; d < 7; d++) {
       var isRest = isRestDay(state.restDays, d);
       var tid = resolvePlanDay(state.weekPlan, state.weekOverrides, digestWeekKey, d);
@@ -1469,7 +1565,7 @@
     }
     lines.push("");
     lines.push("## Ask");
-    lines.push("Given the above, what should change in the next 1-2 weeks — exercise selection, volume, rest days, or pacing? Pay particular attention to any plateaued exercises listed above.");
+    lines.push("Given the above, what should change in the next 1-2 weeks — exercise selection, volume, rest days, or pacing? Pay particular attention to any plateaued exercises and the deload status noted above.");
     lines.push("");
     lines.push("If you have concrete plan changes to propose (not just general advice), include them as a fenced json code block using exactly this shape, so they can be reviewed and imported directly in Settings → Import Plan Changes:");
     lines.push("");
@@ -1509,6 +1605,8 @@
     validateRestDays: validateRestDays,
     repRangeCeiling: repRangeCeiling,
     nextOwnedWeight: nextOwnedWeight,
+    prevOwnedWeight: prevOwnedWeight,
+    isDeloadWeekActive: isDeloadWeekActive,
     suggestProgression: suggestProgression,
     suggestCustomProgression: suggestCustomProgression,
     isSetFilled: isSetFilled,
@@ -1808,9 +1906,37 @@
   function renderToday() {
     var vm = L.buildTodayViewModel(state, viewDate);
     renderWeekNav(vm);
+    renderDeloadRow(vm);
     renderDayStrip(vm);
     renderReadinessPanel(vm);
     renderTodayContent(vm);
+  }
+
+  // A per-week, explicit "back everything off this week" toggle -- shown
+  // as an active banner once on, and nudged (with a one-tap way to turn
+  // it on) when several exercises have independently stalled at once,
+  // since that pattern is more likely fatigue/life than any one
+  // exercise's programming.
+  function renderDeloadRow(vm) {
+    var el = $("#deloadRow");
+    if (!el) return;
+    if (vm.isDeload) {
+      el.innerHTML = '<div class="banner"><strong>Deload week active</strong> — progression suggestions are backing off across the board this week, hit or miss.' +
+        '<div style="margin-top:6px;"><button class="btn ghost sm" data-action="toggle-deload-week">End Deload Week</button></div></div>';
+      return;
+    }
+    var plateaus = L.detectPlateaus(state);
+    var struggling = Object.keys(state.exercises || {}).filter(function (name) { return (state.exercises[name].missStreak || 0) >= 2; });
+    var stalledNames = {};
+    plateaus.forEach(function (p) { stalledNames[p.exercise] = true; });
+    struggling.forEach(function (name) { stalledNames[name] = true; });
+    var stalledCount = Object.keys(stalledNames).length;
+    if (stalledCount >= 2) {
+      el.innerHTML = '<div class="banner">' + stalledCount + ' exercises have stalled (plateaued, or missed target 2+ sessions running). Might be worth a deload week.' +
+        '<div style="margin-top:6px;"><button class="btn ghost sm" data-action="toggle-deload-week">Start Deload Week</button></div></div>';
+    } else {
+      el.innerHTML = "";
+    }
   }
 
   function renderWeekNav(vm) {
@@ -1882,6 +2008,19 @@
     renderToday();
   }
 
+  // Toggles deload mode for the week currently being viewed (not
+  // necessarily the real current week -- you can flag a past or future
+  // week from its own day strip). Suggestions for every exercise back off
+  // for that whole week regardless of individual hit/miss history; see
+  // suggestProgression's isDeloadWeek handling.
+  function toggleDeloadWeek() {
+    var vm = L.buildTodayViewModel(state, viewDate);
+    if (!state.deloadWeeks) state.deloadWeeks = {};
+    if (state.deloadWeeks[vm.weekKey]) delete state.deloadWeeks[vm.weekKey];
+    else state.deloadWeeks[vm.weekKey] = true;
+    persistAndRerender();
+  }
+
   function renderTodayContent(vm) {
     var el = $("#todayContent");
     var restWarning = "";
@@ -1937,7 +2076,7 @@
     }
 
     var exVms = effectiveTemplate.exercises.map(function (def) {
-      return L.buildExerciseViewModel(def, vm.todaySession, state.exercises, readinessVerdict, state.ownedWeights);
+      return L.buildExerciseViewModel(def, vm.todaySession, state.exercises, readinessVerdict, state.ownedWeights, vm.isDeload);
     });
     var allDone = exVms.every(function (e) { return e.complete; });
 
@@ -1953,7 +2092,7 @@
     var customEx = (vm.todaySession && vm.todaySession.exercises || []).filter(function (e) { return e.isCustom; });
     html += customEx.map(function (e) {
       var def = { name: e.name, metric: e.metric || "reps", loaded: e.loaded !== undefined ? e.loaded : true, targetSets: e.sets.length || 1, targetReps: 0 };
-      var suggestion = L.suggestCustomProgression(state.exercises[e.name], readinessVerdict, state.ownedWeights);
+      var suggestion = L.suggestCustomProgression(state.exercises[e.name], readinessVerdict, state.ownedWeights, vm.isDeload);
       var evm = { def: def, sets: e.sets, suggestion: suggestion, complete: L.allSetsComplete(e.sets, e.sets.length) };
       return renderExerciseCard(evm, true);
     }).join("");
@@ -2134,6 +2273,7 @@
       case "strip-day": return viewDay(el.dataset.date);
       case "jump-to-today": return viewDay(L.toDateKey(new Date()));
       case "prev-week": return shiftWeek(-1);
+      case "toggle-deload-week": return toggleDeloadWeek();
       case "next-week": return shiftWeek(1);
       case "toggle-rest-cardio": return toggleRestCardio();
       case "save-cardio": return saveCardio();
@@ -2269,10 +2409,10 @@
       awardXp(xp, prCount > 0 ? (def ? def.name : exerciseName) + " • New PR!" : (def ? def.name : exerciseName));
       session.xpEarned = (session.xpEarned || 0) + xp;
       exEntry._xpAwarded = true;
-      updateExerciseCatalog(exerciseName, exEntry);
+      updateExerciseCatalog(exerciseName, exEntry, def, nowComplete);
       checkWorkoutComplete(session, effectiveTemplate);
     } else {
-      updateExerciseCatalog(exerciseName, exEntry);
+      updateExerciseCatalog(exerciseName, exEntry, def, nowComplete);
     }
     exEntry._wasComplete = nowComplete;
 
@@ -2299,6 +2439,7 @@
     renderTopChips();
     var vm = L.buildTodayViewModel(state, viewDate);
     renderWeekNav(vm);
+    renderDeloadRow(vm);
     renderDayStrip(vm);
     renderReadinessPanel(vm);
     patchExerciseCards(session, effectiveTemplate, vm);
@@ -2349,7 +2490,7 @@
     }
   }
 
-  function updateExerciseCatalog(name, exEntry) {
+  function updateExerciseCatalog(name, exEntry, def, nowComplete) {
     var filled = exEntry.sets.filter(function (s) { return L.isSetFilled(s); });
     if (!filled.length) return;
     var prev = state.exercises[name];
@@ -2366,6 +2507,31 @@
     // happened to be filled last.
     var minRepsInSession = filled.reduce(function (m, s) { return s.reps < m ? s.reps : m; }, filled[0].reps);
     var loadedBestThisSession = L.bestE1RMInSets(exEntry.sets);
+
+    // missStreak (consecutive sessions in a row that missed target) only
+    // gets touched once an exercise is actually complete -- this function
+    // runs on every set you fill in, not just at completion, and while
+    // you're still mid-entry the "worst set so far" is a moving target
+    // that would otherwise flicker the streak up and down as you type.
+    // Once complete, the target/prior-streak to compare against is
+    // snapshotted the first time (_missCheckBaseline) rather than re-read
+    // from `prev` on every subsequent call -- prev is this exercise's own
+    // catalog entry, which this same function just overwrote on the
+    // previous call, so re-reading it fresh each time would compound the
+    // streak within a single session instead of tracking it across them.
+    var missStreak = (prev && prev.missStreak) || 0;
+    if (nowComplete) {
+      if (exEntry._missCheckBaseline === undefined) {
+        exEntry._missCheckBaseline = {
+          missStreak: (prev && prev.missStreak) || 0,
+          target: def ? def.targetReps : (prev ? prev.lastReps : null)
+        };
+      }
+      var baseline = exEntry._missCheckBaseline;
+      var hitThisSession = baseline.target == null ? true : minRepsInSession >= baseline.target;
+      missStreak = hitThisSession ? 0 : baseline.missStreak + 1;
+    }
+
     state.exercises[name] = {
       name: name,
       lastReps: minRepsInSession,
@@ -2377,6 +2543,7 @@
       // credits a rep increase at the same weight as the real progress it
       // is (see estimate1RM).
       bestE1RM: Math.max((prev && prev.bestE1RM) || 0, loadedBestThisSession ? Math.round(loadedBestThisSession.e1rm) : 0),
+      missStreak: missStreak,
       metric: exEntry.metric || (prev && prev.metric) || "reps",
       loaded: exEntry.loaded !== undefined ? exEntry.loaded : ((prev && prev.loaded) || maxWeightInSession > 0),
       lastSetCount: exEntry.sets.length,

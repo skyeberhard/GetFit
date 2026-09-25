@@ -151,6 +151,57 @@ function main() {
   const bodyweightHoldSuppressed = L.suggestProgression(bodyweightDef, { weight: 0, reps: 15, targetReps: 15 }, "RECOVERY");
   check("RECOVERY also suppresses bodyweight rep progression", bodyweightHoldSuppressed.reps === 15 && bodyweightHoldSuppressed.note === "holding (readiness)");
 
+  /* ---- progression suggestion: failure handling (consecutive misses) ---- */
+  const oneMiss = L.suggestProgression(loadedDef, { weight: 30, reps: 9, targetReps: 12 }, null, null, 1);
+  check("a single miss just repeats the same weight -- no deload yet", oneMiss.note === "repeat weight" && oneMiss.weight === 30);
+
+  const twoMissesNoDumbbells = L.suggestProgression(loadedDef, { weight: 30, reps: 9, targetReps: 12 }, null, null, 2);
+  check("two misses in a row triggers a deload, not a third repeat", twoMissesNoDumbbells.note === "deload -10%");
+  // 10% of 30 is 27, floored (never rounded up, to guarantee a real cut) to the nearest 2.5 -> 25.
+  check("deload with no owned weights cuts by at least ~10%, floored to a 2.5 increment", twoMissesNoDumbbells.weight === 25 && twoMissesNoDumbbells.weight < 30);
+  check("deload resets reps back to the rep-range floor", twoMissesNoDumbbells.reps === 12);
+
+  const threeMisses = L.suggestProgression(loadedDef, { weight: 25, reps: 9, targetReps: 12 }, null, null, 3);
+  check("a deload that also gets missed deloads again from the new (lower) weight", threeMisses.note === "deload -10%" && threeMisses.weight < 25);
+
+  const twoMissesWithDumbbells = L.suggestProgression(loadedDef, { weight: 30, reps: 9, targetReps: 12 }, null, ownedWeights, 2);
+  check("deload with owned weights snaps down to the nearest one owned", twoMissesWithDumbbells.note === "deload -10%" && twoMissesWithDumbbells.weight === 25);
+
+  // 10% of the lightest owned weight is still that same weight (or heavier) --
+  // prevOwnedWeight must not return a "snap" that fails to actually be lower.
+  const twoMissesAtLightestOwned = L.suggestProgression(loadedDef, { weight: 20, reps: 9, targetReps: 12 }, null, ownedWeights, 2);
+  check("deloading from the lightest owned weight still forces a real step down", twoMissesAtLightestOwned.weight < 20);
+
+  const bodyweightTwoMisses = L.suggestProgression(bodyweightDef, { weight: 0, reps: 10, targetReps: 15 }, null, null, 2);
+  check("bodyweight deload backs off on reps (nothing to cut in weight)", bodyweightTwoMisses.note === "deload -20% reps" && bodyweightTwoMisses.reps === 12 && bodyweightTwoMisses.reps < 15);
+
+  const noWeightLoggedYetTwoMisses = L.suggestProgression(loadedDef, { weight: 0, reps: 9, targetReps: 12 }, null, ownedWeights, 2);
+  check("a loaded exercise with no weight ever logged deloads via reps, not a cut off of 0", noWeightLoggedYetTwoMisses.note === "deload -20% reps");
+
+  /* ---- progression suggestion: deload week (program-wide override) ---- */
+  const deloadWeekOnHit = L.suggestProgression(loadedDef, { weight: 30, reps: 12, targetReps: 12 }, null, null, 0, true);
+  check("a deload week backs off even on a session that hit target", deloadWeekOnHit.note === "deload week" && deloadWeekOnHit.weight < 30 && deloadWeekOnHit.reps === 12);
+
+  const deloadWeekOverridesReadiness = L.suggestProgression(loadedDef, { weight: 30, reps: 12, targetReps: 12 }, "PUSH", null, 0, true);
+  check("a deload week wins even over a PUSH readiness verdict", deloadWeekOverridesReadiness.note === "deload week");
+
+  const deloadWeekBodyweight = L.suggestProgression(bodyweightDef, { weight: 0, reps: 15, targetReps: 15 }, null, null, 0, true);
+  check("a deload week backs off bodyweight reps too", deloadWeekBodyweight.note === "deload week" && deloadWeekBodyweight.reps < 15);
+
+  const deloadWeekWithDumbbells = L.suggestProgression(loadedDef, { weight: 30, reps: 12, targetReps: 12 }, null, ownedWeights, 0, true);
+  check("a deload week also snaps to an owned weight when one's configured", deloadWeekWithDumbbells.weight === 25);
+
+  /* ---- helpers: prevOwnedWeight / isDeloadWeekActive ---- */
+  check("prevOwnedWeight finds the nearest owned weight at or below target", L.prevOwnedWeight(28, ownedWeights) === 25);
+  check("prevOwnedWeight returns null with no owned weights configured", L.prevOwnedWeight(28, []) === null);
+  check("prevOwnedWeight returns null when target is below every owned weight", L.prevOwnedWeight(10, ownedWeights) === null);
+
+  const deloadState = L.freshState();
+  deloadState.deloadWeeks = { "2026-09-20": true };
+  check("isDeloadWeekActive is true for a flagged week", L.isDeloadWeekActive(deloadState, "2026-09-20") === true);
+  check("isDeloadWeekActive is false for an unflagged week", L.isDeloadWeekActive(deloadState, "2026-09-27") === false);
+  check("isDeloadWeekActive tolerates a missing deloadWeeks map", L.isDeloadWeekActive({}, "2026-09-20") === false);
+
   /* ---- custom-exercise progression ("beat your last time") ---- */
   const noCustomHistory = L.suggestCustomProgression(null);
   check("suggestCustomProgression with no catalog entry reports no history", noCustomHistory.note === "no history");
@@ -165,6 +216,15 @@ function main() {
   const bodyweightCustomEntry = { name: "Wall Sit", lastReps: 45, lastWeight: 0, loaded: false, metric: "seconds" };
   const bodyweightCustomSuggestion = L.suggestCustomProgression(bodyweightCustomEntry);
   check("bodyweight custom exercise suggests +1 over last time", bodyweightCustomSuggestion.reps === 46);
+
+  // A custom exercise's own missStreak (tracked in its catalog entry, same
+  // as a template exercise) still triggers a deload, and a deload week
+  // still overrides a custom exercise too.
+  const strugglingCustomEntry = { name: "Sled Push", lastReps: 8, lastWeight: 50, loaded: true, metric: "reps", missStreak: 2 };
+  const strugglingCustomSuggestion = L.suggestCustomProgression(strugglingCustomEntry);
+  check("a custom exercise's own missStreak triggers a deload", strugglingCustomSuggestion.note === "deload -10%" && strugglingCustomSuggestion.weight < 50);
+  const customDeloadWeekSuggestion = L.suggestCustomProgression(weightedCustomEntry, null, null, true);
+  check("a deload week overrides a custom exercise's suggestion too", customDeloadWeekSuggestion.note === "deload week" && customDeloadWeekSuggestion.weight < 40);
 
   /* ---- XP / leveling ---- */
   const lvl1 = L.levelForXp(0);
@@ -273,6 +333,30 @@ function main() {
   check("v3->v4 migration backfills bestE1RM from session history", fromV3.exercises["Goblet Squat"].bestE1RM === expectedE1RM);
   check("v3->v4 migration preserves existing catalog fields", fromV3.exercises["Goblet Squat"].lastWeight === 30);
   check("v3->v4 migration defaults ownedWeights to an empty array", Array.isArray(fromV3.ownedWeights) && fromV3.ownedWeights.length === 0);
+  // The chain doesn't stop at v4 either -- it continues straight through
+  // to v5, backfilling missStreak and deloadWeeks on the same blob.
+  check("a v3 blob also chains through v4->v5, backfilling missStreak", fromV3.exercises["Goblet Squat"].missStreak === 0);
+  check("a v3 blob also chains through v4->v5, defaulting deloadWeeks", fromV3.deloadWeeks && typeof fromV3.deloadWeeks === "object");
+
+  // A v4 blob (schemaVersion:4, catalog entries with bestE1RM but no
+  // missStreak yet, no deloadWeeks) should backfill missStreak at 0 --
+  // reconstructing a real streak from history isn't reliable (it depends
+  // on whatever target was live in the template at the time), so this
+  // intentionally starts fresh rather than guessing.
+  const v4Blob = {
+    schemaVersion: 4, xp: 300, restDays: [0, 4], weekPlan: Object.assign({}, L.DEFAULT_WEEK_PLAN),
+    weekOverrides: {}, baselines: L.DEFAULT_BASELINES, readiness: {}, sessions: [],
+    templates: L.cloneTemplates(L.WORKOUT_TEMPLATES), longestStreak: 8, ownedWeights: [20, 25, 30],
+    exercises: {
+      "Goblet Squat": { name: "Goblet Squat", lastReps: 10, lastWeight: 30, bestWeight: 30, bestReps: 12, bestE1RM: 42, metric: "reps", loaded: true, lastSetCount: 3, updatedAt: "2026-08-15T00:00:00.000Z" }
+    }
+  };
+  const fromV4 = L.migrate(v4Blob);
+  check("v4->v5 migration stamps current schema version", fromV4.schemaVersion === L.SCHEMA_VERSION);
+  check("v4->v5 migration backfills missStreak at 0", fromV4.exercises["Goblet Squat"].missStreak === 0);
+  check("v4->v5 migration preserves existing catalog fields", fromV4.exercises["Goblet Squat"].bestE1RM === 42);
+  check("v4->v5 migration defaults deloadWeeks to an empty object", fromV4.deloadWeeks && Object.keys(fromV4.deloadWeeks).length === 0);
+  check("v4->v5 migration preserves other top-level fields", fromV4.ownedWeights.length === 3 && fromV4.longestStreak === 8);
 
   const alreadyCurrent = L.migrate(L.freshState());
   check("migrating already-current state is a no-op passthrough", alreadyCurrent.schemaVersion === L.SCHEMA_VERSION);
@@ -322,6 +406,14 @@ function main() {
   const squatMaxedDef = Object.assign({}, squatDef, { name: "Goblet Squat Maxed" });
   const squatMaxedVm = L.buildExerciseViewModel(squatMaxedDef, null, fixtureState.exercises, null, [20, 25, 30, 35]);
   check("exercise view-model passes readiness/ownedWeights through to progression", squatMaxedVm.suggestion.weight === 35);
+
+  fixtureState.exercises["Goblet Squat Deloading"] = { name: "Goblet Squat Deloading", lastReps: 10, lastWeight: 30, missStreak: 2, updatedAt: new Date().toISOString() };
+  const squatDeloadingDef = Object.assign({}, squatDef, { name: "Goblet Squat Deloading" });
+  const squatDeloadingVm = L.buildExerciseViewModel(squatDeloadingDef, null, fixtureState.exercises);
+  check("exercise view-model reads missStreak from the catalog and deloads", squatDeloadingVm.suggestion.note === "deload -10%");
+
+  const squatDeloadWeekVm = L.buildExerciseViewModel(squatDef, null, fixtureState.exercises, null, null, true);
+  check("exercise view-model passes isDeloadWeek through to progression", squatDeloadWeekVm.suggestion.note === "deload week");
 
   /* ---- day compliance / streak ---- */
   function buildCompleteWorkoutSession(date, template) {
@@ -541,6 +633,24 @@ function main() {
   check("digest includes a PR section", digest.indexOf("PRs in the last 30 days") !== -1);
   check("digest includes a plateaued-exercises section", digest.indexOf("Plateaued exercises") !== -1);
   check("digest includes the plan-change JSON schema instructions", digest.indexOf("Import Plan Changes") !== -1 && digest.indexOf("```json") !== -1);
+
+  /* ---- digest: deload status ---- */
+  check("digest includes a deload-status section", digest.indexOf("Deload status") !== -1);
+  check("digest reports the current week as NOT a deload week by default", digest.indexOf("This week is NOT currently marked a deload week.") !== -1);
+
+  const deloadDigestState = L.freshState();
+  deloadDigestState.deloadWeeks[L.weekStartKey(fridayMorning)] = true;
+  const deloadDigest = L.buildDigest(deloadDigestState, fridayMorning);
+  check("digest reflects an active deload week", deloadDigest.indexOf("This week is currently marked a deload week.") !== -1);
+
+  const strugglingDigestState = L.freshState();
+  strugglingDigestState.exercises = {
+    "Goblet Squat": { name: "Goblet Squat", lastReps: 10, lastWeight: 30, missStreak: 2, updatedAt: "2026-09-20T00:00:00.000Z" },
+    "Dumbbell Row": { name: "Dumbbell Row", lastReps: 8, lastWeight: 25, missStreak: 3, updatedAt: "2026-09-20T00:00:00.000Z" }
+  };
+  const strugglingDigest = L.buildDigest(strugglingDigestState, fridayMorning);
+  check("digest names exercises on a 2+ session miss streak", strugglingDigest.indexOf("Goblet Squat") !== -1 && strugglingDigest.indexOf("Dumbbell Row") !== -1 && strugglingDigest.indexOf("miss streak") !== -1);
+  check("digest suggests a deload week when multiple exercises are struggling", strugglingDigest.indexOf("Worth considering a deload week") !== -1);
 
   // Regression: the digest's "Current plan" must reflect an active
   // this-week swap, not just the permanent weekPlan -- otherwise an AI
