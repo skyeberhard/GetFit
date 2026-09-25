@@ -626,6 +626,73 @@ function main() {
   check("strength score is capped at 99", attrs.strength.score <= 99);
   check("endurance score reflects logged cardio minutes", attrs.endurance.score > 0);
 
+  /* ---- Strength attribute: trend-based (avg % change in performance),
+     not a straight PR count -- see computeStrengthTrend for why ---- */
+  const freshTrend = L.computeStrengthTrend(L.freshState(), fridayMorning, 30);
+  check("computeStrengthTrend reports no trend with under 2 sessions per exercise", freshTrend.avgPct === null && freshTrend.exerciseCount === 0);
+
+  const strengthTrendState = L.freshState();
+  strengthTrendState.sessions = [
+    { date: "2026-09-01", exercises: [{ name: "Goblet Squat", sets: [{ reps: 10, weight: 20 }] }] },
+    { date: "2026-09-15", exercises: [{ name: "Goblet Squat", sets: [{ reps: 10, weight: 24 }] }] },
+    { date: "2026-09-20", exercises: [{ name: "Push-Up", sets: [{ reps: 20, weight: 0 }] }] } // only 1 session -- excluded
+  ];
+  // listLoggedExercises (the name list computeStrengthTrend scans) reads
+  // from the catalog, not the sessions array -- populate it too, same as
+  // updateExerciseCatalog would from real logging.
+  strengthTrendState.exercises = {
+    "Goblet Squat": { name: "Goblet Squat", lastReps: 10, lastWeight: 24, updatedAt: "2026-09-15T00:00:00.000Z" },
+    "Push-Up": { name: "Push-Up", lastReps: 20, lastWeight: 0, updatedAt: "2026-09-20T00:00:00.000Z" }
+  };
+  const trend = L.computeStrengthTrend(strengthTrendState, fridayMorning, 30);
+  check("computeStrengthTrend only counts exercises with 2+ sessions in the window", trend.exerciseCount === 1);
+  // buildExerciseHistory rounds est1RM to the nearest lb (it's a display/
+  // comparison value, not raw math) -- the expected % change uses those
+  // same rounded endpoints (27 -> 32), not the unrounded 1RM formula.
+  const expectedFirstE1RM = Math.round(20 * (1 + 10 / 30)), expectedLastE1RM = Math.round(24 * (1 + 10 / 30));
+  const expectedPct = (expectedLastE1RM - expectedFirstE1RM) / expectedFirstE1RM;
+  check("computeStrengthTrend computes % change from earliest to latest in-window value", Math.abs(trend.avgPct - expectedPct) < 0.0001);
+
+  const attrsWithTrend = L.computeAttributes(strengthTrendState, fridayMorning);
+  check("Strength score centers at 50 for a flat trend, rises above it for a positive one", attrsWithTrend.strength.score > 50 && attrsWithTrend.strength.score <= 99);
+  check("Strength detail reports the average trend percentage", attrsWithTrend.strength.detail.indexOf("%") !== -1);
+
+  const decliningState = L.freshState();
+  decliningState.sessions = [
+    { date: "2026-09-01", exercises: [{ name: "Dumbbell Row", sets: [{ reps: 10, weight: 30 }] }] },
+    { date: "2026-09-15", exercises: [{ name: "Dumbbell Row", sets: [{ reps: 10, weight: 25 }] }] }
+  ];
+  decliningState.exercises = { "Dumbbell Row": { name: "Dumbbell Row", lastReps: 10, lastWeight: 25, updatedAt: "2026-09-15T00:00:00.000Z" } };
+  const decliningAttrs = L.computeAttributes(decliningState, fridayMorning);
+  check("Strength score drops below 50 on a declining trend", decliningAttrs.strength.score < 50);
+
+  // Regression: the old PR-count formula spiked the moment you added a
+  // brand-new exercise (a first-ever log trivially "beats" a baseline of
+  // zero). A single log with no repeat now contributes no trend at all.
+  const freshExerciseOnly = L.freshState();
+  freshExerciseOnly.sessions = [{ date: "2026-09-20", exercises: [{ name: "Brand New Lift", sets: [{ reps: 10, weight: 50 }] }] }];
+  freshExerciseOnly.exercises = { "Brand New Lift": { name: "Brand New Lift", lastReps: 10, lastWeight: 50, updatedAt: "2026-09-20T00:00:00.000Z" } };
+  const freshExerciseAttrs = L.computeAttributes(freshExerciseOnly, fridayMorning);
+  check("a single new exercise doesn't inflate Strength (no trend yet)", freshExerciseAttrs.strength.score === 0);
+
+  /* ---- Endurance attribute: effort-adjusted by logged avg HR ---- */
+  check("cardioEffortMultiplier is neutral (1x) with no HR logged", L.cardioEffortMultiplier({ durationMin: 30 }, L.DEFAULT_BASELINES) === 1);
+  const hardMultiplier = L.cardioEffortMultiplier({ durationMin: 30, hr: 150 }, L.DEFAULT_BASELINES);
+  const easyMultiplier = L.cardioEffortMultiplier({ durationMin: 30, hr: 90 }, L.DEFAULT_BASELINES);
+  check("a higher avg HR yields a higher effort multiplier than a lower one", hardMultiplier > easyMultiplier);
+  check("cardioEffortMultiplier is clamped to a sane range", L.cardioEffortMultiplier({ hr: 300 }, L.DEFAULT_BASELINES) <= 1.6 && L.cardioEffortMultiplier({ hr: 1 }, L.DEFAULT_BASELINES) >= 0.7);
+
+  const hrCardioState = L.freshState();
+  hrCardioState.sessions = [{ date: "2026-09-20", cardio: { cardioType: "Run", durationMin: 30, hr: 150 }, exercises: [] }];
+  const noHrCardioState = L.freshState();
+  noHrCardioState.sessions = [{ date: "2026-09-20", cardio: { cardioType: "Bike", durationMin: 30 }, exercises: [] }];
+  const hrAttrs = L.computeAttributes(hrCardioState, fridayMorning);
+  const noHrAttrs = L.computeAttributes(noHrCardioState, fridayMorning);
+  check("a high-HR cardio session scores higher Endurance than the same duration with no HR logged", hrAttrs.endurance.score > noHrAttrs.endurance.score);
+  check("Endurance detail notes when it's effort-adjusted", hrAttrs.endurance.detail.indexOf("effort-adjusted") !== -1);
+  check("Endurance detail does NOT claim effort-adjustment with no HR logged", noHrAttrs.endurance.detail.indexOf("effort-adjusted") === -1);
+  check("Endurance detail always shows the real raw minutes you actually logged", hrAttrs.endurance.detail.indexOf("30 cardio min") !== -1);
+
   /* ---- digest ---- */
   const digest = L.buildDigest(streakState, fridayMorning);
   check("digest is a non-empty string", typeof digest === "string" && digest.length > 100);

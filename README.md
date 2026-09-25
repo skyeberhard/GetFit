@@ -1,6 +1,6 @@
 # GetFit (TRAIN)
 
-A personal, no-gym fitness tracker — single-file HTML/PWA, runs locally via `file://` on Android, no server or account required.
+A personal, no-gym fitness tracker — single-file HTML/PWA, runs locally via `file://` on Android, no server or account required. Installable as a real app when served over https.
 
 ## Why this exists
 
@@ -8,19 +8,20 @@ Built to fit a specific setup: home equipment (pull-up bar, dumbbells, bike, jum
 
 ## Status
 
-Core app is up in `app/index.html`: per-set logging with progression suggestions, readiness check-in, cardio logger, a streak + RPG-attribute gamification layer (Strength/Endurance/Consistency, derived from logged data), in-app editing of the weekly plan and workout templates, an AI check-in digest export, and JSON backup/restore. Clean/minimal visual theme with light and dark variants. See `docs/roadmap.md` for what's next (PWA installability, deload weeks) and what's been explicitly deferred as scope creep (reading/Scripture tracking).
+Core app is up in `app/index.html`: per-set logging with progression suggestions (rep-range based, snapping to dumbbells you actually own, with deload-week and miss-streak failure handling), readiness check-in that actually affects suggestions, cardio logger, a streak + RPG-attribute gamification layer (Strength/Endurance/Consistency, all derived from logged data), in-app editing of the weekly plan and workout templates, an AI check-in digest export, and JSON backup/restore. Clean/minimal visual theme with light and dark variants. Installable as a PWA (`app/manifest.json` + `app/service-worker.js` + `app/icons/`) when served over https — see **Running it** below. See `docs/roadmap.md` for what's next and what's been explicitly deferred as scope creep (reading/Scripture tracking).
 
 ## Structure
 
 ```
-app/     the actual PWA — single index.html, no build step
-docs/     architecture notes, feature log, open design questions
-exports/ local data exports (gitignored — never committed)
+app/         the actual PWA — index.html (the whole app), manifest.json,
+             service-worker.js, icons/ — no build step
+docs/        architecture notes, feature log, open design questions
+exports/     local data exports (gitignored — never committed)
 ```
 
 ## Design principles (carried over from the last build)
 
-- Single self-contained HTML file — no backend, no build pipeline, works offline
+- `app/index.html` is a single self-contained file — no backend, no build pipeline, works fully offline on its own even without the PWA files alongside it
 - IndexedDB as primary storage, localStorage as a mirror; schema is versioned and migrations are tested against real saved data before each release
 - Minimize taps, especially mid-workout — friction there is a first-class bug
 - Every change validated with `node --check` plus a small Node harness that simulates real render paths and data migration before it's considered done
@@ -29,7 +30,9 @@ See `docs/overview.md` for the fuller feature/architecture history and `docs/roa
 
 ## Running it
 
-Open `app/index.html` directly in a browser (desktop) or via `file://` on Android. No install step. To make it installable as a PWA, a manifest + service worker will be added once the core app is back up.
+**Just the file, no install:** open `app/index.html` directly in a browser (desktop) or via `file://` on Android. Works fully offline, nothing to set up. This is all `app/manifest.json`/`service-worker.js`/`icons/` need not exist for.
+
+**Installable as an app:** browsers only allow "Add to Home Screen"/"Install" with real offline caching when a service worker is registered, and service workers require https (or `localhost`) — never `file://`. So installability needs `app/` served from a real origin, e.g. GitHub Pages pointed at this repo's `app/` folder. Opened that way, it installs like any other PWA (home-screen icon, standalone window, offline caching via `service-worker.js`).
 
 ## License
 

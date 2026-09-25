@@ -4,6 +4,18 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <title>TRAIN</title>
+<!-- PWA installability: inert when opened as a bare file (no manifest/
+     service-worker fetch happens over file://, and the registration call
+     in the app-shell script below is itself guarded) -- only takes effect
+     once served over https or localhost. See app/service-worker.js. -->
+<link rel="icon" href="icons/icon-192.png">
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#f6f6f4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#141414" media="(prefers-color-scheme: dark)">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TRAIN">
 <style>
   :root{
     --bg:#f6f6f4;
@@ -404,7 +416,7 @@
 
     <div class="panel">
       <h2>About</h2>
-      <div class="muted">Single-file PWA. All data stored locally in IndexedDB with a localStorage mirror. No account, no server, no network calls.</div>
+      <div class="muted">index.html works standalone — open the file directly and everything works fully offline, no server. Served over https (e.g. GitHub Pages), it's also installable as a real app (manifest.json + service-worker.js alongside it enable "Add to Home Screen"/"Install"). All data stored locally in IndexedDB with a localStorage mirror. No account, no server-side code, no network calls.</div>
     </div>
   </section>
 </main>
@@ -948,23 +960,81 @@
     return toDateKey(addDays(now, -days));
   }
 
+  // Average % change in per-exercise performance (estimated 1RM for a
+  // loaded exercise, reps/seconds for bodyweight/timed) between your
+  // earliest and latest logged session of it within the last `windowDays`
+  // -- across every exercise that has at least two sessions in that
+  // window. Replaces a straight PR count, which spiked in the first weeks
+  // of any new exercise (a first-ever log always "beats" a baseline of
+  // zero, so adding exercises alone inflated it) and drifted toward zero
+  // even for someone holding steady strength, since holding steady sets
+  // no new records. An exercise with only one session in the window has
+  // nothing to compare against yet, so it's excluded rather than counted
+  // as flat -- one data point isn't a trend.
+  function computeStrengthTrend(state, now, windowDays) {
+    now = now || new Date();
+    windowDays = windowDays || 30;
+    var sinceKey = daysAgoKey(now, windowDays);
+    var pctChanges = [];
+    listLoggedExercises(state).forEach(function (name) {
+      var history = buildExerciseHistory(state.sessions || [], name);
+      var inWindow = history.points.filter(function (p) { return p.date >= sinceKey; });
+      if (inWindow.length < 2) return;
+      var valueOf = function (p) { return history.metric === "weight" ? p.est1RM : p.bestReps; };
+      var first = valueOf(inWindow[0]);
+      var last = valueOf(inWindow[inWindow.length - 1]);
+      if (!(first > 0)) return;
+      pctChanges.push((last - first) / first);
+    });
+    if (!pctChanges.length) return { avgPct: null, exerciseCount: 0 };
+    var avgPct = pctChanges.reduce(function (a, b) { return a + b; }, 0) / pctChanges.length;
+    return { avgPct: avgPct, exerciseCount: pctChanges.length };
+  }
+
+  // A rough effort multiplier for one cardio session, from its logged
+  // average HR relative to your own resting-HR baseline -- already
+  // collected for the readiness check-in, so this needs no new field.
+  // Sessions with no avg HR logged count at a neutral 1x, identical to
+  // plain minutes -- this only ever differentiates when you've bothered
+  // to log HR, never penalizes skipping it.
+  function cardioEffortMultiplier(cardio, baselines) {
+    var hr = Number(cardio && cardio.hr);
+    if (!hr) return 1;
+    var resting = (baselines && Number(baselines.restingHR)) || DEFAULT_BASELINES.restingHR;
+    return Math.max(0.7, Math.min(1.6, 0.6 + (hr - resting) / 100));
+  }
+
   function computeAttributes(state, now) {
     now = now || new Date();
     var since = daysAgoKey(now, 30);
-    var prs = countRecentPRs(state.sessions || [], since);
-    var strengthScore = Math.min(99, prs.length * 8);
 
-    var cardioMin = (state.sessions || []).reduce(function (sum, s) {
-      if (s.date >= since && s.cardio) return sum + (Number(s.cardio.durationMin) || 0);
-      return sum;
-    }, 0);
-    var enduranceScore = Math.min(99, Math.round(cardioMin / 4));
+    var strengthTrend = computeStrengthTrend(state, now, 30);
+    var strengthScore, strengthDetail;
+    if (strengthTrend.avgPct == null) {
+      strengthScore = 0;
+      strengthDetail = "not enough repeat history yet — log an exercise twice within 30 days to see a trend";
+    } else {
+      strengthScore = Math.max(0, Math.min(99, Math.round(50 + strengthTrend.avgPct * 400)));
+      var pctLabel = (strengthTrend.avgPct >= 0 ? "+" : "") + Math.round(strengthTrend.avgPct * 100) + "%";
+      strengthDetail = pctLabel + " avg trend across " + strengthTrend.exerciseCount + " exercise" + (strengthTrend.exerciseCount === 1 ? "" : "s") + " in the last 30 days";
+    }
+
+    var rawMinutes = 0, effortMinutes = 0;
+    (state.sessions || []).forEach(function (s) {
+      if (s.date >= since && s.cardio) {
+        var mins = Number(s.cardio.durationMin) || 0;
+        rawMinutes += mins;
+        effortMinutes += mins * cardioEffortMultiplier(s.cardio, state.baselines);
+      }
+    });
+    var enduranceScore = Math.min(99, Math.round(effortMinutes / 4));
+    var enduranceDetail = Math.round(rawMinutes) + " cardio min in the last 30 days" + (effortMinutes !== rawMinutes ? " (effort-adjusted by logged HR)" : "");
 
     var consistencyScore = computeConsistency(state, now, 30);
 
     return {
-      strength: { label: "Strength", score: strengthScore, detail: prs.length + " PR" + (prs.length === 1 ? "" : "s") + " in the last 30 days" },
-      endurance: { label: "Endurance", score: enduranceScore, detail: cardioMin + " cardio min in the last 30 days" },
+      strength: { label: "Strength", score: strengthScore, detail: strengthDetail },
+      endurance: { label: "Endurance", score: enduranceScore, detail: enduranceDetail },
       consistency: { label: "Consistency", score: consistencyScore, detail: consistencyScore + "% of scheduled days hit in the last 30 days" }
     };
   }
@@ -1627,6 +1697,8 @@
     countRecentPRs: countRecentPRs,
     daysAgoKey: daysAgoKey,
     computeAttributes: computeAttributes,
+    computeStrengthTrend: computeStrengthTrend,
+    cardioEffortMultiplier: cardioEffortMultiplier,
     isTrainBackupShape: isTrainBackupShape,
     validateImportPayload: validateImportPayload,
     migrate: migrate,
@@ -1851,7 +1923,22 @@
       render();
     });
     wireGlobalEvents();
+    registerServiceWorker();
   });
+
+  // Installable-PWA support -- a no-op everywhere this can't work. Service
+  // workers are simply not permitted on file:// pages (the protocol check
+  // below skips the attempt entirely rather than letting it fail), which
+  // is exactly how this app runs when opened directly from disk; there,
+  // it's already fully offline as a local file and needs no worker.
+  // Serving app/ over https (or localhost) is what actually makes "Add to
+  // Home Screen" / "Install" install a real standalone app with offline
+  // caching, via manifest.json + service-worker.js alongside this file.
+  function registerServiceWorker() {
+    if (location.protocol === "file:") return;
+    if (!("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.register("service-worker.js").catch(function () { /* best-effort */ });
+  }
 
   // Persists the real historical peak, not just today's current streak --
   // state.longestStreak was previously never written anywhere, so once a
