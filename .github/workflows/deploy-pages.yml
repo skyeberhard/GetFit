@@ -1,0 +1,45 @@
+# Deploys app/ (the TRAIN PWA) to GitHub Pages. This is what actually
+# makes app/manifest.json + app/service-worker.js usable -- service
+# workers cannot register on file://, so real installability needs the
+# app served from a real https origin. Opening app/index.html directly
+# as a local file is unaffected either way and keeps working offline.
+#
+# "claude/elegant-dirac-i7ggpx" is listed because it's this repo's only
+# branch today; "main" is included too so this keeps working with no
+# changes needed if/when the project adopts a conventional default
+# branch later.
+name: Deploy TRAIN to GitHub Pages
+
+on:
+  push:
+    branches: ["main", "claude/elegant-dirac-i7ggpx"]
+    paths: ["app/**", ".github/workflows/deploy-pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload app/ as the Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: app
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
