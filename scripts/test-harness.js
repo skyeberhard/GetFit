@@ -106,6 +106,35 @@ function main() {
   const allBlankExceptSoreness = L.computeReadinessScore({ sleepScore: null, restingHR: null, soreness: 3 }, baselines);
   check("all fields blank except soreness scores purely from soreness", allBlankExceptSoreness === -1); // soreness 3 -> -1, per the table
 
+  /* ---- rolling readiness baselines ---- */
+  const now2609 = new Date("2026-09-25T00:00:00.000Z");
+  const sparseReadiness = { "2026-09-24": { restingHR: 55, sleepScore: 75 }, "2026-09-23": { restingHR: 57 } };
+  const sparseRolling = L.computeRollingBaselines(sparseReadiness, now2609, 30);
+  check("computeRollingBaselines returns null under the minimum sample count", sparseRolling.restingHR === null && sparseRolling.sleepGood === null);
+
+  const richReadiness = {};
+  for (let i = 1; i <= 10; i++) {
+    const d = new Date(now2609); d.setDate(d.getDate() - i);
+    richReadiness[L.toDateKey(d)] = { restingHR: 50, sleepScore: 80 };
+  }
+  const richRolling = L.computeRollingBaselines(richReadiness, now2609, 30);
+  check("computeRollingBaselines averages resting HR once the sample floor is met", richRolling.restingHR === 50);
+  check("computeRollingBaselines averages sleep score once the sample floor is met", richRolling.sleepGood === 80);
+  check("computeRollingBaselines derives sleepLow as sleepGood - 20", richRolling.sleepLow === 60);
+  check("computeRollingBaselines ignores entries outside the window", L.computeRollingBaselines(richReadiness, now2609, 5).sampleCount.restingHR === 5);
+
+  const oldEntry = { "2026-08-01": { restingHR: 50, sleepScore: 80 } };
+  check("computeRollingBaselines excludes readiness entries older than the window", L.computeRollingBaselines(oldEntry, now2609, 30).sampleCount.restingHR === 0);
+
+  const autoState = { baselinesAuto: true, baselines: L.DEFAULT_BASELINES, readiness: richReadiness };
+  check("resolveBaselines uses the rolling average once enough history exists", L.resolveBaselines(autoState, now2609).restingHR === 50);
+
+  const manualState = { baselinesAuto: false, baselines: { restingHR: 52, sleepGood: 80, sleepLow: 55 }, readiness: richReadiness };
+  check("resolveBaselines respects manual mode even with plenty of history", L.resolveBaselines(manualState, now2609).restingHR === 52);
+
+  const autoButSparseState = { baselinesAuto: true, baselines: L.DEFAULT_BASELINES, readiness: sparseReadiness };
+  check("resolveBaselines falls back to the manual/default value per-field when history is too thin", L.resolveBaselines(autoButSparseState, now2609).restingHR === L.DEFAULT_BASELINES.restingHR);
+
   /* ---- progression suggestion: rep-range before weight ---- */
   const loadedDef = { name: "Goblet Squat", metric: "reps", loaded: true, targetSets: 4, targetReps: 12 };
   // Default rep-range ceiling with no explicit targetRepsMax is target+4 (16 here).
@@ -357,6 +386,19 @@ function main() {
   check("v4->v5 migration preserves existing catalog fields", fromV4.exercises["Goblet Squat"].bestE1RM === 42);
   check("v4->v5 migration defaults deloadWeeks to an empty object", fromV4.deloadWeeks && Object.keys(fromV4.deloadWeeks).length === 0);
   check("v4->v5 migration preserves other top-level fields", fromV4.ownedWeights.length === 3 && fromV4.longestStreak === 8);
+
+  // A v5 blob (schemaVersion:5, no baselinesAuto yet) should default to
+  // auto EXCEPT when baselines were already customized away from the
+  // defaults before this feature existed -- that's a deliberate manual
+  // choice already made and shouldn't be silently overridden on upgrade.
+  const v5BlobDefaultBaselines = Object.assign({}, v4Blob, { schemaVersion: 5, deloadWeeks: {}, exercises: { "Goblet Squat": Object.assign({}, v4Blob.exercises["Goblet Squat"], { missStreak: 1 }) } });
+  const fromV5Default = L.migrate(v5BlobDefaultBaselines);
+  check("v5->v6 migration defaults to auto baselines when unchanged from defaults", fromV5Default.baselinesAuto === true);
+
+  const v5BlobCustomBaselines = Object.assign({}, v5BlobDefaultBaselines, { baselines: { restingHR: 52, sleepGood: 80, sleepLow: 55 } });
+  const fromV5Custom = L.migrate(v5BlobCustomBaselines);
+  check("v5->v6 migration respects already-customized baselines as manual", fromV5Custom.baselinesAuto === false);
+  check("v5->v6 migration stamps current schema version", fromV5Custom.schemaVersion === L.SCHEMA_VERSION);
 
   const alreadyCurrent = L.migrate(L.freshState());
   check("migrating already-current state is a no-op passthrough", alreadyCurrent.schemaVersion === L.SCHEMA_VERSION);
@@ -814,6 +856,39 @@ function main() {
   const parsedFloor = L.parsePlanChangePayload(floorText);
   check("parsePlanChangePayload floors invalid targetSets/targetReps at 1", parsedFloor.payload.templates.upperA[0].targetSets === 1 && parsedFloor.payload.templates.upperA[0].targetReps === 1);
 
+  /* ---- growable workout templates ---- */
+  check("getTemplateIds lists the built-in templates for a fresh account", L.getTemplateIds(L.freshState()).length === 4);
+
+  const addResult1 = L.addTemplate(L.WORKOUT_TEMPLATES, "Arms Day");
+  check("addTemplate slugifies the label into a readable id", addResult1.id === "arms-day");
+  check("addTemplate adds a new empty template under that id", addResult1.templates["arms-day"].label === "Arms Day" && addResult1.templates["arms-day"].exercises.length === 0);
+  check("addTemplate does not mutate the source templates map", !L.WORKOUT_TEMPLATES["arms-day"]);
+
+  const addResult2 = L.addTemplate(addResult1.templates, "Arms Day");
+  check("addTemplate disambiguates a duplicate label with a numeric suffix", addResult2.id === "arms-day-2");
+
+  const removed = L.removeTemplateFromMap(addResult1.templates, "arms-day");
+  check("removeTemplateFromMap removes only the targeted template", !removed["arms-day"] && removed.upperA);
+  check("removeTemplateFromMap does not mutate the source templates map", !!addResult1.templates["arms-day"]);
+
+  const inUseState = L.freshState();
+  inUseState.weekPlan = Object.assign({}, inUseState.weekPlan, { 1: "upperA", 3: "upperA" });
+  check("templateWeekdaysInUse finds every weekday assigned to a template", L.templateWeekdaysInUse(inUseState, "upperA").join(",") === "1,3");
+  check("templateWeekdaysInUse is empty for a template no weekday is assigned to", L.templateWeekdaysInUse(inUseState, "lower").length === 0);
+
+  // Passing state lets a custom-added template be proposed via plan-change
+  // import too, not just the 4 built-in ones -- the whole point of making
+  // templates growable is that nothing downstream should still treat them
+  // as a fixed list.
+  const customTemplateState = L.freshState();
+  const addedCustom = L.addTemplate(customTemplateState.templates, "Arms Day");
+  customTemplateState.templates = addedCustom.templates;
+  const customTemplateText = "```json\n" + JSON.stringify({ planChanges: { templates: { "arms-day": { exercises: [{ name: "Curl", targetSets: 3, targetReps: 12 }] } } } }) + "\n```";
+  const parsedWithoutState = L.parsePlanChangePayload(customTemplateText);
+  check("parsePlanChangePayload rejects a custom template id when called without state (back-compat default)", parsedWithoutState.valid === false);
+  const parsedWithState = L.parsePlanChangePayload(customTemplateText, customTemplateState);
+  check("parsePlanChangePayload accepts a custom template id when given the real state", parsedWithState.valid === true && parsedWithState.payload.templates["arms-day"].length === 1);
+
   /* ---- plan-change import: diff + apply ---- */
   const diffState = L.freshState();
   const diffPayload = {
@@ -888,6 +963,12 @@ function main() {
   const patched = L.updateExerciseInTemplate(originalTemplate, 0, { targetSets: 6 });
   check("updateExerciseInTemplate patches only the targeted field", patched.exercises[0].targetSets === 6 && patched.exercises[0].name === originalTemplate.exercises[0].name);
   check("updateExerciseInTemplate does not mutate the source template", originalTemplate.exercises[0].targetSets === 4);
+
+  /* ---- daysBetween (backup reminder) ---- */
+  check("daysBetween is null for no timestamp", L.daysBetween(null, new Date("2026-09-25T00:00:00.000Z")) === null);
+  check("daysBetween is null for an unparseable timestamp", L.daysBetween("not a date", new Date("2026-09-25T00:00:00.000Z")) === null);
+  check("daysBetween counts whole days elapsed", L.daysBetween("2026-09-10T00:00:00.000Z", new Date("2026-09-25T00:00:00.000Z")) === 15);
+  check("daysBetween is 0 for the same day", L.daysBetween("2026-09-25T00:00:00.000Z", new Date("2026-09-25T05:00:00.000Z")) === 0);
 
   /* ---- summary ---- */
   console.log("\n" + passes + " passed, " + failures + " failed.");

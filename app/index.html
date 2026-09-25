@@ -205,6 +205,7 @@
   .update-banner .actions{display:flex;align-items:center;gap:6px;flex-shrink:0;}
   .update-banner button{background:rgba(255,255,255,0.2);color:inherit;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;}
   .update-banner button.dismiss{background:none;padding:6px;font-size:15px;line-height:1;opacity:0.85;}
+  .backup-banner{background:var(--amber);color:var(--bg);}
 
   .modal-backdrop{
     display:none;position:fixed;inset:0;background:rgba(20,20,18,0.45);z-index:50;
@@ -393,6 +394,10 @@
 
     <div class="panel">
       <h2>Readiness Baselines</h2>
+      <label class="muted" style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+        <input type="checkbox" id="baselinesAutoToggle"> Auto-calculate from my check-in history (last 30 days)
+      </label>
+      <div class="muted" id="baselinesAutoStatus" style="margin-bottom:10px;"></div>
       <label class="field-label">Resting HR baseline (bpm)</label>
       <input type="number" id="baseRHR" inputmode="numeric">
       <div style="height:8px"></div>
@@ -402,7 +407,7 @@
       <label class="field-label">Sleep score — low threshold</label>
       <input type="number" id="baseSleepLow" inputmode="numeric">
       <div style="height:10px"></div>
-      <button class="btn primary block" data-action="save-baselines">Save Baselines</button>
+      <button class="btn primary block" id="saveBaselinesBtn" data-action="save-baselines">Save Baselines</button>
     </div>
 
     <div class="panel">
@@ -420,11 +425,14 @@
         <button class="btn block" data-action="export-data">Export JSON</button>
         <button class="btn block" data-action="import-data">Import JSON</button>
       </div>
+      <div class="muted" id="lastBackupLine" style="margin-bottom:8px;"></div>
       <button class="btn ghost block" data-action="open-digest">Generate AI Check-In Digest</button>
       <div style="height:8px"></div>
       <button class="btn ghost block" data-action="open-plan-import">Import Plan Changes</button>
       <input type="file" id="importFile" accept="application/json" style="display:none;">
     </div>
+
+    <div class="panel" id="autoBackupPanel"></div>
 
     <div class="panel">
       <h2>About</h2>
@@ -456,6 +464,14 @@
   </div>
 </div>
 
+<div class="update-banner backup-banner" id="backupBanner">
+  <span id="backupBannerText">Back up your data</span>
+  <div class="actions">
+    <button data-action="goto-backup-settings">Settings</button>
+    <button class="dismiss" data-action="dismiss-backup-banner" aria-label="Dismiss">✕</button>
+  </div>
+</div>
+
 <div class="xp-toast" id="xpToast"></div>
 
 <div class="modal-backdrop" id="modalBackdrop">
@@ -471,7 +487,7 @@
 (function (root) {
   "use strict";
 
-  var SCHEMA_VERSION = 5;
+  var SCHEMA_VERSION = 6;
 
   var WEEKDAY_LABELS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 
@@ -529,7 +545,6 @@
   // pace/route detail, so excluding a real Saturday activity just to avoid
   // "duplicating" Garmin was the wrong call.
   var CARDIO_TYPES = ["Run", "Bike", "Swim", "Jump Rope", "Other"];
-  var TRAINING_TEMPLATE_IDS = ["upperA", "lower", "upperB", "cardio"];
 
   /* ---------- date helpers ---------- */
   function toDateKey(d) {
@@ -548,6 +563,16 @@
     return next;
   }
 
+  // Whole days between an ISO timestamp and now -- null for "never" (no
+  // timestamp yet, or an unparseable one), used for both the "Last backup:
+  // N days ago" Settings line and deciding whether the overdue nudge shows.
+  function daysBetween(isoTimestamp, now) {
+    if (!isoTimestamp) return null;
+    var then = new Date(isoTimestamp);
+    if (isNaN(then.getTime())) return null;
+    return Math.max(0, Math.floor((now.getTime() - then.getTime()) / 86400000));
+  }
+
   /* ---------- plan resolution ---------- */
   function resolvePlanDay(weekPlan, overrides, weekKey, weekday) {
     var wk = overrides && overrides[weekKey];
@@ -559,6 +584,56 @@
 
   function getTemplates(state) {
     return (state && state.templates) || WORKOUT_TEMPLATES;
+  }
+
+  // All valid template ids for this account -- dynamic, not the old fixed
+  // 4-template list, since templates can now be added/removed. Object key
+  // order is insertion order for these (non-numeric) ids, so this also
+  // doubles as display order everywhere a template list is shown.
+  function getTemplateIds(state) {
+    return Object.keys(getTemplates(state));
+  }
+
+  function slugify(label) {
+    var s = String(label || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-+|-+$)/g, "");
+    return s || "workout";
+  }
+
+  function uniqueTemplateId(existingIds, label) {
+    var base = slugify(label);
+    var id = base, n = 2;
+    while (existingIds.indexOf(id) !== -1) { id = base + "-" + n; n++; }
+    return id;
+  }
+
+  // Immutable, like the exercise-level template edits below -- returns a
+  // new templates map plus the new template's id (the caller assigns it
+  // into state.templates and persists).
+  function addTemplate(templates, label) {
+    var clean = String(label || "").trim() || "New Workout";
+    var id = uniqueTemplateId(Object.keys(templates), clean);
+    var next = Object.assign({}, templates);
+    next[id] = { id: id, label: clean, exercises: [] };
+    return { templates: next, id: id };
+  }
+
+  function removeTemplateFromMap(templates, id) {
+    var next = Object.assign({}, templates);
+    delete next[id];
+    return next;
+  }
+
+  // Which permanent weekdays (0-6) are assigned this template in the
+  // regular weekPlan -- deletion is blocked while any exist, rather than
+  // silently reassigning a day out from under someone. One-off weekly
+  // swaps (weekOverrides) aren't checked here; those are transient,
+  // per-week records, not an ongoing assignment.
+  function templateWeekdaysInUse(state, templateId) {
+    var days = [];
+    Object.keys(state.weekPlan || {}).forEach(function (day) {
+      if (state.weekPlan[day] === templateId) days.push(Number(day));
+    });
+    return days;
   }
 
   function isRestDay(restDays, weekday) {
@@ -819,6 +894,59 @@
   }
 
   var DEFAULT_BASELINES = { restingHR: 60, sleepGood: 70, sleepLow: 50 };
+  var BASELINE_WINDOW_DAYS = 30;
+  var BASELINE_MIN_SAMPLES = 5;
+
+  // A personal center for each baseline, averaged from your own logged
+  // check-ins over the last `windowDays` -- a fixed 60bpm/70-score default
+  // means nothing if your real resting HR is 50 or your real "good" sleep
+  // score is 85; this is what actually calibrates PUSH/STEADY/HOLD/RECOVERY
+  // (and the Endurance attribute's effort multiplier) to you specifically.
+  // Requires BASELINE_MIN_SAMPLES independently per field (someone might
+  // log sleep every day but skip resting HR, or vice versa) -- fewer than
+  // that and the field comes back null, deferring to the manual/default
+  // value rather than drawing a real conclusion from 1-2 data points.
+  // sleepLow isn't its own logged field -- a meaningfully bad night is
+  // defined relative to your own average, not a second average of its own.
+  function computeRollingBaselines(readiness, now, windowDays) {
+    windowDays = windowDays || BASELINE_WINDOW_DAYS;
+    var rhrValues = [], sleepValues = [];
+    Object.keys(readiness || {}).forEach(function (dateKey) {
+      var entry = readiness[dateKey];
+      if (!entry) return;
+      var d = new Date(dateKey);
+      if (isNaN(d.getTime())) return;
+      var age = Math.floor((now.getTime() - d.getTime()) / 86400000);
+      if (age < 0 || age > windowDays) return;
+      if (hasValue(entry.restingHR)) rhrValues.push(Number(entry.restingHR));
+      if (hasValue(entry.sleepScore)) sleepValues.push(Number(entry.sleepScore));
+    });
+    var avg = function (arr) { return arr.reduce(function (a, b) { return a + b; }, 0) / arr.length; };
+    var restingHR = rhrValues.length >= BASELINE_MIN_SAMPLES ? Math.round(avg(rhrValues)) : null;
+    var sleepAvg = sleepValues.length >= BASELINE_MIN_SAMPLES ? Math.round(avg(sleepValues)) : null;
+    return {
+      restingHR: restingHR,
+      sleepGood: sleepAvg,
+      sleepLow: sleepAvg != null ? Math.max(0, sleepAvg - 20) : null,
+      sampleCount: { restingHR: rhrValues.length, sleep: sleepValues.length }
+    };
+  }
+
+  // The baselines actually used for scoring: the rolling personal average
+  // where auto mode is on and enough history exists, falling back field-by-
+  // field to the manual/default values otherwise -- so a new account (or
+  // one that just switched a single field back to manual) still scores
+  // sensibly instead of getting nulls.
+  function resolveBaselines(state, now) {
+    var manual = (state && state.baselines) || DEFAULT_BASELINES;
+    if (!state || state.baselinesAuto === false) return manual;
+    var rolling = computeRollingBaselines(state.readiness || {}, now || new Date(), BASELINE_WINDOW_DAYS);
+    return {
+      restingHR: rolling.restingHR != null ? rolling.restingHR : manual.restingHR,
+      sleepGood: rolling.sleepGood != null ? rolling.sleepGood : manual.sleepGood,
+      sleepLow: rolling.sleepLow != null ? rolling.sleepLow : manual.sleepLow
+    };
+  }
 
   /* ---------- day compliance / streak / consistency ---------- */
   function isDayCompliant(state, dateObj) {
@@ -1039,12 +1167,13 @@
       strengthDetail = pctLabel + " avg trend across " + strengthTrend.exerciseCount + " exercise" + (strengthTrend.exerciseCount === 1 ? "" : "s") + " in the last 30 days";
     }
 
+    var effortBaselines = resolveBaselines(state, now);
     var rawMinutes = 0, effortMinutes = 0;
     (state.sessions || []).forEach(function (s) {
       if (s.date >= since && s.cardio) {
         var mins = Number(s.cardio.durationMin) || 0;
         rawMinutes += mins;
-        effortMinutes += mins * cardioEffortMultiplier(s.cardio, state.baselines);
+        effortMinutes += mins * cardioEffortMultiplier(s.cardio, effortBaselines);
       }
     });
     var enduranceScore = Math.min(99, Math.round(effortMinutes / 4));
@@ -1175,6 +1304,10 @@
       state = migrateV4ToV5(state);
       version = 5;
     }
+    if (version === 5) {
+      state = migrateV5ToV6(state);
+      version = 6;
+    }
     state.schemaVersion = SCHEMA_VERSION;
     return state;
   }
@@ -1288,6 +1421,24 @@
     return next;
   }
 
+  // Adds `baselinesAuto` -- whether readiness baselines are a rolling
+  // 30-day personal average (see computeRollingBaselines/resolveBaselines)
+  // instead of the fixed manual values in `baselines`. Defaults to true
+  // (auto) EXCEPT for an account that already customized `baselines` away
+  // from DEFAULT_BASELINES before this existed -- that's a deliberate
+  // choice already made and shouldn't be silently overridden by a computed
+  // number on upgrade. A brand-new account (freshState) starts in auto
+  // mode directly, since there's nothing to preserve.
+  function migrateV5ToV6(state) {
+    var next = Object.assign({}, state);
+    var baselines = next.baselines || DEFAULT_BASELINES;
+    var stillDefault = baselines.restingHR === DEFAULT_BASELINES.restingHR &&
+      baselines.sleepGood === DEFAULT_BASELINES.sleepGood &&
+      baselines.sleepLow === DEFAULT_BASELINES.sleepLow;
+    next.baselinesAuto = stillDefault;
+    return next;
+  }
+
   function cloneTemplates(templates) {
     return JSON.parse(JSON.stringify(templates));
   }
@@ -1320,6 +1471,7 @@
     state.longestStreak = 0;
     state.ownedWeights = [];
     state.deloadWeeks = {};
+    state.baselinesAuto = true;
     return state;
   }
 
@@ -1382,7 +1534,12 @@
     };
   }
 
-  function parsePlanChangePayload(text) {
+  // validIds defaults to the built-in templates' ids so existing callers
+  // (and tests) that don't have a state handy keep working -- pass the
+  // real state whenever it's available so a custom-added template is
+  // recognized as valid, not rejected as unknown.
+  function parsePlanChangePayload(text, state) {
+    var validIds = state ? getTemplateIds(state) : Object.keys(WORKOUT_TEMPLATES);
     var errors = [];
     var parsed = extractJsonBlock(text);
     if (!parsed || typeof parsed !== "object") {
@@ -1394,8 +1551,8 @@
 
     if (changes.templates && typeof changes.templates === "object") {
       Object.keys(changes.templates).forEach(function (templateId) {
-        if (TRAINING_TEMPLATE_IDS.indexOf(templateId) === -1) {
-          errors.push('Unknown template "' + templateId + '" — skipped. Only existing templates (' + TRAINING_TEMPLATE_IDS.join(", ") + ") can be edited this way.");
+        if (validIds.indexOf(templateId) === -1) {
+          errors.push('Unknown template "' + templateId + '" — skipped. Only existing templates (' + validIds.join(", ") + ") can be edited this way.");
           return;
         }
         var rawExercises = changes.templates[templateId] && changes.templates[templateId].exercises;
@@ -1420,7 +1577,7 @@
           errors.push('Invalid weekday "' + dayKey + '" — skipped.');
           return;
         }
-        if (TRAINING_TEMPLATE_IDS.indexOf(templateId) === -1) {
+        if (validIds.indexOf(templateId) === -1) {
           errors.push('Unknown template "' + templateId + '" for ' + WEEKDAY_LABELS[day] + ' — skipped.');
           return;
         }
@@ -1672,7 +1829,7 @@
     }, null, 2));
     lines.push("```");
     lines.push("");
-    lines.push("Only include a template if you're changing it -- give its FULL exercise list (existing ones you're not changing plus your edits), since importing replaces that template's whole list. metric is \"reps\" or \"seconds\"; loaded is true/false. weekPlan keys are weekday numbers (0=Sun..6=Sat); only existing template ids (" + TRAINING_TEMPLATE_IDS.join(", ") + ") are valid. Omit the json block entirely if you have no concrete changes to propose.");
+    lines.push("Only include a template if you're changing it -- give its FULL exercise list (existing ones you're not changing plus your edits), since importing replaces that template's whole list. metric is \"reps\" or \"seconds\"; loaded is true/false. weekPlan keys are weekday numbers (0=Sun..6=Sat); only existing template ids (" + getTemplateIds(state).join(", ") + ") are valid -- add a new workout template from Settings first if you want to propose one that doesn't exist yet. Omit the json block entirely if you have no concrete changes to propose.");
 
     return lines.join("\n");
   }
@@ -1684,14 +1841,20 @@
     WORKOUT_TEMPLATES: WORKOUT_TEMPLATES,
     DEFAULT_WEEK_PLAN: DEFAULT_WEEK_PLAN,
     CARDIO_TYPES: CARDIO_TYPES,
-    TRAINING_TEMPLATE_IDS: TRAINING_TEMPLATE_IDS,
+    getTemplateIds: getTemplateIds,
+    addTemplate: addTemplate,
+    removeTemplateFromMap: removeTemplateFromMap,
+    templateWeekdaysInUse: templateWeekdaysInUse,
     DEFAULT_BASELINES: DEFAULT_BASELINES,
+    computeRollingBaselines: computeRollingBaselines,
+    resolveBaselines: resolveBaselines,
     WORKOUT_COMPLETE_BONUS: WORKOUT_COMPLETE_BONUS,
     PR_BONUS_XP: PR_BONUS_XP,
 
     toDateKey: toDateKey,
     weekStartKey: weekStartKey,
     addDays: addDays,
+    daysBetween: daysBetween,
     resolvePlanDay: resolvePlanDay,
     getTemplates: getTemplates,
     isRestDay: isRestDay,
@@ -1759,8 +1922,12 @@
 (function () {
   "use strict";
   var DB_NAME = "train-db";
-  var DB_VERSION = 1;
+  // v2 adds the "handles" store for a linked backup-file FileSystemFileHandle
+  // (see Store.setBackupHandle below) -- an existing v1 database just gets
+  // that one store added on top, "state" is untouched.
+  var DB_VERSION = 2;
   var LS_KEY = "train:v1";
+  var LAST_BACKUP_KEY = "train:lastBackupAt";
 
   function openDb() {
     return new Promise(function (resolve, reject) {
@@ -1769,6 +1936,9 @@
         var idb = e.target.result;
         if (!idb.objectStoreNames.contains("state")) {
           idb.createObjectStore("state", { keyPath: "key" });
+        }
+        if (!idb.objectStoreNames.contains("handles")) {
+          idb.createObjectStore("handles", { keyPath: "key" });
         }
       };
       req.onsuccess = function (e) { resolve(e.target.result); };
@@ -1792,6 +1962,29 @@
       return new Promise(function (resolve, reject) {
         var tx = idb.transaction("state", "readwrite");
         tx.objectStore("state").put({ key: key, value: value });
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror = function () { reject(tx.error); };
+      });
+    });
+  }
+
+  function idbGetHandle(key) {
+    return openDb().then(function (idb) {
+      return new Promise(function (resolve, reject) {
+        var tx = idb.transaction("handles", "readonly");
+        var r = tx.objectStore("handles").get(key);
+        r.onsuccess = function () { resolve(r.result ? r.result.value : undefined); };
+        r.onerror = function () { reject(r.error); };
+      });
+    });
+  }
+
+  function idbSetHandle(key, value) {
+    return openDb().then(function (idb) {
+      return new Promise(function (resolve, reject) {
+        var tx = idb.transaction("handles", "readwrite");
+        if (value === undefined) tx.objectStore("handles").delete(key);
+        else tx.objectStore("handles").put({ key: key, value: value });
         tx.oncomplete = function () { resolve(); };
         tx.onerror = function () { reject(tx.error); };
       });
@@ -1825,11 +2018,78 @@
 
     persist: function (currentState) {
       try { localStorage.setItem(LS_KEY, JSON.stringify(currentState)); } catch (e) { /* quota / private mode */ }
+      scheduleBackupWrite(currentState);
       return idbSet("app", currentState).catch(function () { /* idb unavailable — localStorage mirror still holds */ });
     },
 
-    save: function (currentState) { return this.persist(currentState); }
+    save: function (currentState) { return this.persist(currentState); },
+
+    /* ---------- backup-file link (File System Access API) ----------
+       A user-picked on-disk file that gets rewritten with a fresh export
+       automatically as state changes, so a real backup exists without
+       anyone having to remember to tap "Export JSON". Only available in
+       Chromium browsers over https/localhost (feature-detected by the
+       caller); everywhere else this is simply never wired up and manual
+       Export/Import keeps working exactly as before. */
+    getBackupHandle: function () {
+      return idbGetHandle("backup").catch(function () { return undefined; });
+    },
+
+    setBackupHandle: function (handle) {
+      return idbSetHandle("backup", handle);
+    },
+
+    clearBackupHandle: function () {
+      return idbSetHandle("backup", undefined);
+    },
+
+    // Writes now, bypassing the debounce -- used right after linking a file
+    // (so it's not empty until the next edit) and when the app is about to
+    // go to the background, since that's the best/only reliable moment to
+    // catch a session that's about to close for good.
+    flushBackupNow: function (currentState) {
+      return writeBackupFile(currentState);
+    },
+
+    lastBackupAt: function () {
+      try { return localStorage.getItem(LAST_BACKUP_KEY); } catch (e) { return null; }
+    },
+
+    markBackupNow: function () { markBackupNow(); }
   };
+
+  function markBackupNow() {
+    try { localStorage.setItem(LAST_BACKUP_KEY, new Date().toISOString()); } catch (e) { /* quota / private mode */ }
+  }
+
+  // "granted" without a prompt only ever happens for a permission this
+  // origin already has (a fresh pick always starts granted); asking again
+  // here is what lets a debounced background write recover quietly after a
+  // browser restart re-scopes the grant, without ever prompting the user
+  // from a non-gesture context (queryPermission never prompts).
+  function writeBackupFile(currentState) {
+    return idbGetHandle("backup").then(function (handle) {
+      if (!handle) return false;
+      return handle.queryPermission({ mode: "readwrite" }).then(function (perm) {
+        if (perm !== "granted") return false;
+        return handle.createWritable()
+          .then(function (writable) {
+            return writable.write(JSON.stringify(currentState)).then(function () { return writable.close(); });
+          })
+          .then(function () { markBackupNow(); return true; });
+      });
+    }).catch(function () { return false; });
+  }
+
+  // Debounced so a burst of ordinary saves (typing a set, ticking a
+  // checkmark) collapses into one disk write once things go quiet, rather
+  // than writing the file on every keystroke.
+  var backupWriteTimer = null;
+  function scheduleBackupWrite(currentState) {
+    if (typeof indexedDB === "undefined") return;
+    clearTimeout(backupWriteTimer);
+    backupWriteTimer = setTimeout(function () { writeBackupFile(currentState); }, 4000);
+  }
 
   window.Store = Store;
 })();
@@ -1948,6 +2208,12 @@
     });
     wireGlobalEvents();
     registerServiceWorker();
+    // Best chance to catch state that would otherwise wait out the
+    // debounce -- the app backgrounding/closing is exactly when a write
+    // needs to have already happened, not be pending.
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "hidden" && state) Store.flushBackupNow(state);
+    });
   });
 
   // Installable-PWA support -- a no-op everywhere this can't work. Service
@@ -1992,10 +2258,151 @@
   function showUpdateBanner() {
     var el = $("#updateBanner");
     if (el) el.classList.add("show");
+    positionBackupBanner();
   }
   function dismissUpdateBanner() {
     var el = $("#updateBanner");
     if (el) el.classList.remove("show");
+    positionBackupBanner();
+  }
+
+  /* ---------- backup reminder + linked-file auto-backup ---------- */
+  var BACKUP_OVERDUE_DAYS = 14;
+  var BACKUP_SNOOZE_KEY = "train:backupNudgeDismissedAt";
+  var BACKUP_SNOOZE_MS = 24 * 3600000;
+
+  // Sits below the update banner rather than on top of it when both are
+  // showing at once (rare, but a genuine update and an overdue backup can
+  // coincide) -- update-banner's own top:0 is left alone.
+  function positionBackupBanner() {
+    var backupEl = $("#backupBanner");
+    var updateEl = $("#updateBanner");
+    if (!backupEl) return;
+    if (updateEl && updateEl.classList.contains("show") && backupEl.classList.contains("show")) {
+      backupEl.style.top = updateEl.offsetHeight + "px";
+    } else {
+      backupEl.style.top = "";
+    }
+  }
+
+  // Only nags once real data exists (a fresh, empty account has nothing to
+  // lose) and backs off for a day after being dismissed rather than
+  // reappearing on every single render while the backup stays overdue.
+  function renderBackupBanner() {
+    var el = $("#backupBanner");
+    if (!el) return;
+    if (!state.sessions || !state.sessions.length) { el.classList.remove("show"); positionBackupBanner(); return; }
+    var days = L.daysBetween(Store.lastBackupAt(), new Date());
+    var overdue = days === null || days >= BACKUP_OVERDUE_DAYS;
+    var snoozedAt = null;
+    try { snoozedAt = localStorage.getItem(BACKUP_SNOOZE_KEY); } catch (e) { /* private mode */ }
+    var snoozed = snoozedAt && (Date.now() - new Date(snoozedAt).getTime()) < BACKUP_SNOOZE_MS;
+    if (!overdue || snoozed) { el.classList.remove("show"); positionBackupBanner(); return; }
+    $("#backupBannerText").textContent = days === null ? "You've never backed up your data" : "Back up your data — it's been " + days + " days";
+    el.classList.add("show");
+    positionBackupBanner();
+  }
+
+  function dismissBackupBanner() {
+    try { localStorage.setItem(BACKUP_SNOOZE_KEY, new Date().toISOString()); } catch (e) { /* private mode */ }
+    $("#backupBanner").classList.remove("show");
+  }
+
+  function gotoBackupSettings() {
+    switchView("settings");
+    var panel = $("#autoBackupPanel");
+    if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function renderBackupInfoLine() {
+    var el = $("#lastBackupLine");
+    if (!el) return;
+    var days = L.daysBetween(Store.lastBackupAt(), new Date());
+    el.textContent = days === null ? "Last backup: never"
+      : days === 0 ? "Last backup: today"
+      : "Last backup: " + days + " day" + (days === 1 ? "" : "s") + " ago";
+  }
+
+  // File System Access API (Chrome/Edge over https, or installed as the
+  // app) lets a linked on-disk file be rewritten automatically as state
+  // changes -- see Store.setBackupHandle/writeBackupFile. Everywhere else
+  // (Firefox, Safari, file://) this simply isn't offered; manual Export/
+  // Import above keeps working regardless.
+  function renderAutoBackupPanel() {
+    var el = $("#autoBackupPanel");
+    if (!el) return;
+    if (typeof window.showSaveFilePicker !== "function") {
+      el.innerHTML = '<h2>Auto-Backup to a File</h2>' +
+        '<div class="muted">Needs Chrome or Edge (desktop or Android) served over https, or installed as the app — not available here. Export/Import above still works everywhere.</div>';
+      return;
+    }
+    Store.getBackupHandle().then(function (handle) {
+      if (!handle) {
+        el.innerHTML = '<h2>Auto-Backup to a File</h2>' +
+          '<div class="muted" style="margin-bottom:10px;">Link a file once and TRAIN keeps it updated automatically in the background — a real backup that exists without you ever having to remember to export.</div>' +
+          '<button class="btn primary block" data-action="link-backup-file">Link a Backup File</button>';
+        return;
+      }
+      return handle.queryPermission({ mode: "readwrite" }).then(function (perm) {
+        if (perm === "granted") {
+          el.innerHTML = '<h2>Auto-Backup to a File</h2>' +
+            '<div class="muted" style="margin-bottom:10px;">Backing up automatically to <strong>' + esc(handle.name) + '</strong>.</div>' +
+            '<div class="row" style="gap:8px;">' +
+            '<button class="btn block" data-action="backup-now">Back Up Now</button>' +
+            '<button class="btn ghost block" data-action="unlink-backup-file">Unlink</button>' +
+            "</div>";
+        } else {
+          el.innerHTML = '<h2>Auto-Backup to a File</h2>' +
+            '<div class="banner" style="margin-bottom:10px;">Lost access to <strong>' + esc(handle.name) + '</strong> (can happen after a browser restart) — reconnect to resume auto-backup.</div>' +
+            '<div class="row" style="gap:8px;">' +
+            '<button class="btn primary block" data-action="reconnect-backup-file">Reconnect</button>' +
+            '<button class="btn ghost block" data-action="unlink-backup-file">Unlink</button>' +
+            "</div>";
+        }
+      });
+    }).catch(function () {
+      el.innerHTML = '<h2>Auto-Backup to a File</h2><div class="muted">Could not check backup-file status.</div>';
+    });
+  }
+
+  function refreshBackupUi() {
+    renderAutoBackupPanel();
+    renderBackupInfoLine();
+    renderBackupBanner();
+  }
+
+  function linkBackupFile() {
+    window.showSaveFilePicker({
+      suggestedName: "train-backup.json",
+      types: [{ description: "JSON", accept: { "application/json": [".json"] } }]
+    }).then(function (handle) {
+      return Store.setBackupHandle(handle).then(function () { return Store.flushBackupNow(state); });
+    }).then(refreshBackupUi).catch(function (err) {
+      if (err && err.name === "AbortError") return; // user closed the picker
+    });
+  }
+
+  function unlinkBackupFile() {
+    Store.clearBackupHandle().then(refreshBackupUi);
+  }
+
+  function backupNow() {
+    Store.flushBackupNow(state).then(function (ok) {
+      refreshBackupUi();
+      if (!ok) alert("Could not write the backup file — try Reconnect, or unlink and re-link it.");
+    });
+  }
+
+  // requestPermission (unlike queryPermission) can prompt the browser's own
+  // permission UI, but only from a real user gesture -- which this is,
+  // since it only ever runs from a tap on the Reconnect button.
+  function reconnectBackupFile() {
+    Store.getBackupHandle().then(function (handle) {
+      if (!handle) return;
+      return handle.requestPermission({ mode: "readwrite" }).then(function (perm) {
+        if (perm === "granted") return Store.flushBackupNow(state);
+      });
+    }).then(refreshBackupUi);
   }
 
   // Persists the real historical peak, not just today's current streak --
@@ -2017,6 +2424,7 @@
     renderToday();
     renderProgress();
     renderSettings();
+    renderBackupBanner();
   }
 
   /* ---------- top bar chips ---------- */
@@ -2412,6 +2820,10 @@
     $("#modalBackdrop").addEventListener("click", function (e) {
       if (e.target === e.currentTarget) closeModal();
     });
+
+    $("#baselinesAutoToggle").addEventListener("change", function (e) {
+      toggleBaselinesAuto(e.target.checked);
+    });
   }
 
   function switchView(name) {
@@ -2454,6 +2866,15 @@
       case "download-digest": return downloadDigest();
       case "reload-app": return location.reload();
       case "dismiss-update-banner": return dismissUpdateBanner();
+      case "dismiss-backup-banner": return dismissBackupBanner();
+      case "goto-backup-settings": return gotoBackupSettings();
+      case "link-backup-file": return linkBackupFile();
+      case "unlink-backup-file": return unlinkBackupFile();
+      case "backup-now": return backupNow();
+      case "reconnect-backup-file": return reconnectBackupFile();
+      case "add-template": return openAddTemplateModal();
+      case "confirm-add-template": return confirmAddTemplate();
+      case "delete-template": return deleteTemplateFlow();
       case "open-plan-import": return openPlanImportModal();
       case "preview-plan-changes": return previewPlanChanges();
       case "apply-plan-changes": return applyPlanChangesConfirmed();
@@ -2835,7 +3256,7 @@
       restingHR: $("#inRhr").value === "" ? null : Number($("#inRhr").value),
       soreness: Number($("#inSoreness").value) || 3
     };
-    var result = L.computeReadinessVerdict(input, state.baselines);
+    var result = L.computeReadinessVerdict(input, L.resolveBaselines(state, new Date()));
     var dateKey = L.toDateKey(viewDate);
     state.readiness[dateKey] = Object.assign({}, input, { verdict: result.verdict, score: result.score, checkedAt: new Date().toISOString() });
     Store.save(state);
@@ -2854,7 +3275,7 @@
   function openSwapModal() {
     var vm = L.buildTodayViewModel(state, viewDate);
     var templates = L.getTemplates(state);
-    var options = L.TRAINING_TEMPLATE_IDS.map(function (id) {
+    var options = L.getTemplateIds(state).map(function (id) {
       return '<button class="btn block" style="margin-bottom:6px;" data-action="confirm-swap" data-template="' + id + '">' + templates[id].label + "</button>";
     }).join("");
     var titleSuffix = isRealToday(vm.dateKey) ? "" : " — " + formatDateLabel(vm.dateKey);
@@ -2980,12 +3401,54 @@
     renderWeekPlanEditor();
     renderTemplatePicker();
     renderTemplateEditor();
-
-    $("#baseRHR").value = state.baselines.restingHR;
-    $("#baseSleepGood").value = state.baselines.sleepGood;
-    $("#baseSleepLow").value = state.baselines.sleepLow;
+    renderBaselinesPanel();
 
     $("#ownedWeights").value = (state.ownedWeights || []).join(", ");
+
+    renderBackupInfoLine();
+    renderAutoBackupPanel();
+  }
+
+  // Auto mode shows the live computed rolling average (read-only -- there's
+  // nothing to Save while it's driving itself); manual mode is the original
+  // editable-fields-plus-Save-button behavior, unchanged.
+  function renderBaselinesPanel() {
+    var auto = state.baselinesAuto !== false;
+    var toggle = $("#baselinesAutoToggle");
+    toggle.checked = auto;
+
+    var rhrInput = $("#baseRHR"), sleepGoodInput = $("#baseSleepGood"), sleepLowInput = $("#baseSleepLow");
+    var saveBtn = $("#saveBaselinesBtn");
+    var statusEl = $("#baselinesAutoStatus");
+
+    if (auto) {
+      var rolling = L.computeRollingBaselines(state.readiness, new Date(), 30);
+      var effective = L.resolveBaselines(state, new Date());
+      rhrInput.value = effective.restingHR;
+      sleepGoodInput.value = effective.sleepGood;
+      sleepLowInput.value = effective.sleepLow;
+      [rhrInput, sleepGoodInput, sleepLowInput].forEach(function (el) { el.disabled = true; });
+      saveBtn.style.display = "none";
+      var rhrStatus = rolling.sampleCount.restingHR >= 5
+        ? "Resting HR from " + rolling.sampleCount.restingHR + " check-ins."
+        : "Resting HR: only " + rolling.sampleCount.restingHR + " check-in" + (rolling.sampleCount.restingHR === 1 ? "" : "s") + " so far (need 5+) — using the default for now.";
+      var sleepStatus = rolling.sampleCount.sleep >= 5
+        ? "Sleep from " + rolling.sampleCount.sleep + " check-ins."
+        : "Sleep: only " + rolling.sampleCount.sleep + " check-in" + (rolling.sampleCount.sleep === 1 ? "" : "s") + " so far (need 5+) — using the default for now.";
+      statusEl.textContent = rhrStatus + " " + sleepStatus;
+    } else {
+      [rhrInput, sleepGoodInput, sleepLowInput].forEach(function (el) { el.disabled = false; });
+      saveBtn.style.display = "";
+      rhrInput.value = state.baselines.restingHR;
+      sleepGoodInput.value = state.baselines.sleepGood;
+      sleepLowInput.value = state.baselines.sleepLow;
+      statusEl.textContent = "Set manually — switch on Auto to calculate these from your own check-in history instead.";
+    }
+  }
+
+  function toggleBaselinesAuto(checked) {
+    state.baselinesAuto = checked;
+    persistAndRerender();
   }
 
   function saveOwnedWeights() {
@@ -3028,7 +3491,7 @@
   function renderWeekPlanEditor() {
     var el = $("#weekPlanEditor");
     var templates = L.getTemplates(state);
-    var options = L.TRAINING_TEMPLATE_IDS.map(function (id) { return { value: id, label: templates[id].label }; });
+    var options = L.getTemplateIds(state).map(function (id) { return { value: id, label: templates[id].label }; });
     var restDays = state.restDays;
     el.innerHTML = L.WEEKDAY_LABELS.map(function (label, day) {
       var isRest = restDays.indexOf(day) !== -1;
@@ -3049,10 +3512,12 @@
   function renderTemplatePicker() {
     var el = $("#templatePickerWrap");
     var templates = L.getTemplates(state);
-    var editableIds = L.TRAINING_TEMPLATE_IDS.filter(function (id) { return !templates[id].isCardio; });
+    var editableIds = L.getTemplateIds(state).filter(function (id) { return !templates[id].isCardio; });
     if (editableIds.indexOf(planEditorTemplateId) === -1) planEditorTemplateId = editableIds[0];
     var options = editableIds.map(function (id) { return { value: id, label: templates[id].label }; });
-    el.innerHTML = renderFselect("templatePicker", options, planEditorTemplateId);
+    el.innerHTML = renderFselect("templatePicker", options, planEditorTemplateId) +
+      '<button class="btn ghost sm" data-action="add-template" style="margin-top:8px;">+ New Workout Template</button>' +
+      (editableIds.length > 1 ? '<button class="btn ghost sm" data-action="delete-template" style="margin-top:8px;margin-left:6px;">Delete This Template</button>' : "");
     wireFselect("templatePicker", options, function (value) {
       planEditorTemplateId = value;
       renderTemplateEditor();
@@ -3141,6 +3606,52 @@
     updatePlanTemplate(function (t) { return L.moveExerciseInTemplate(t, index, dir); });
   }
 
+  /* ---------- add/delete workout templates ---------- */
+  function openAddTemplateModal() {
+    var body =
+      '<div class="modal-grip"></div>' +
+      '<div class="modal-head"><h2>New Workout Template</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
+      '<label class="field-label">Name</label>' +
+      '<input type="text" id="newTemplateLabel" placeholder="e.g. Full Body, Arms Day" autocomplete="off">' +
+      '<div style="height:14px"></div>' +
+      '<button class="btn primary block" data-action="confirm-add-template">Create</button>';
+    openModal(body);
+  }
+
+  function confirmAddTemplate() {
+    var label = $("#newTemplateLabel").value.trim();
+    if (!label) { alert("Give the template a name."); return; }
+    var result = L.addTemplate(state.templates, label);
+    state.templates = result.templates;
+    planEditorTemplateId = result.id;
+    closeModal();
+    persistAndRerender();
+  }
+
+  // Blocked while any day's permanent weekPlan assignment still points at
+  // it -- silently reassigning a day out from under someone (or leaving a
+  // day pointing at a template that no longer exists) is worse than one
+  // extra step of reassigning it first. The "+ New"/"Delete" buttons
+  // themselves only ever offer this for non-cardio templates with at
+  // least one other one left (see renderTemplatePicker), so there's
+  // always something left to fall back to.
+  function deleteTemplateFlow() {
+    var templates = L.getTemplates(state);
+    var template = templates[planEditorTemplateId];
+    if (!template) return;
+    var inUseDays = L.templateWeekdaysInUse(state, planEditorTemplateId);
+    if (inUseDays.length) {
+      var dayNames = inUseDays.map(function (d) { return L.WEEKDAY_LABELS[d]; }).join(", ");
+      alert('"' + template.label + '" is assigned to ' + dayNames + ' in the Weekly Plan — reassign ' + (inUseDays.length === 1 ? "that day" : "those days") + ' first, then delete it.');
+      return;
+    }
+    if (!confirm('Delete "' + template.label + '"? This can\'t be undone.')) return;
+    state.templates = L.removeTemplateFromMap(state.templates, planEditorTemplateId);
+    var remaining = L.getTemplateIds(state).filter(function (id) { return !state.templates[id].isCardio; });
+    planEditorTemplateId = remaining[0];
+    persistAndRerender();
+  }
+
   function saveBaselines() {
     state.baselines = {
       restingHR: Number($("#baseRHR").value) || L.DEFAULT_BASELINES.restingHR,
@@ -3213,7 +3724,7 @@
 
   function previewPlanChanges() {
     var text = $("#planImportText").value;
-    var result = L.parsePlanChangePayload(text);
+    var result = L.parsePlanChangePayload(text, state);
     var preview = $("#planImportPreview");
     pendingPlanChangePayload = null;
 
@@ -3366,6 +3877,9 @@
 
   function exportData() {
     downloadJsonBackup(state, "train-export-");
+    Store.markBackupNow();
+    renderBackupInfoLine();
+    renderBackupBanner();
   }
 
   document.addEventListener("DOMContentLoaded", function () {
