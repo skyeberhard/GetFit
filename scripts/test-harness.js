@@ -701,6 +701,15 @@ function main() {
   check("digest includes a plateaued-exercises section", digest.indexOf("Plateaued exercises") !== -1);
   check("digest includes the plan-change JSON schema instructions", digest.indexOf("Import Plan Changes") !== -1 && digest.indexOf("```json") !== -1);
 
+  // Regression: a reps-axis PR on a timed/bodyweight exercise (e.g. Plank,
+  // metric "seconds") must be labeled with its real unit, not a hardcoded
+  // "reps" -- the digest is meant to be read literally by a human or an AI.
+  const timedPrState = L.freshState();
+  timedPrState.sessions = [{ date: "2026-09-20", exercises: [{ name: "Plank", sets: [{ reps: 45, weight: 0 }] }] }];
+  timedPrState.exercises = { "Plank": { name: "Plank", lastReps: 45, lastWeight: 0, metric: "seconds", loaded: false, updatedAt: "2026-09-20T00:00:00.000Z" } };
+  const timedPrDigest = L.buildDigest(timedPrState, fridayMorning);
+  check("digest labels a timed exercise's PR in seconds, not reps", timedPrDigest.indexOf("Plank — 45 sec") !== -1 && timedPrDigest.indexOf("45 reps") === -1);
+
   /* ---- digest: deload status ---- */
   check("digest includes a deload-status section", digest.indexOf("Deload status") !== -1);
   check("digest reports the current week as NOT a deload week by default", digest.indexOf("This week is NOT currently marked a deload week.") !== -1);

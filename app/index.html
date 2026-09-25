@@ -1595,7 +1595,11 @@
     lines.push("## PRs in the last 30 days");
     if (prs.length) {
       prs.slice(-15).forEach(function (pr) {
-        lines.push("- " + pr.date + ": " + pr.exercise + (pr.type === "reps" ? " — " + pr.reps + " reps" : " — " + pr.weight + " lb × " + pr.reps + " (est. 1RM " + pr.est1RM + " lb)"));
+        // A reps-axis PR can be a timed hold (Plank, seconds) rather than
+        // literal reps -- look up the exercise's actual metric instead of
+        // hardcoding "reps", same as the plateau section below already does.
+        var prUnit = (state.exercises[pr.exercise] && state.exercises[pr.exercise].metric === "seconds") ? "sec" : "reps";
+        lines.push("- " + pr.date + ": " + pr.exercise + (pr.type === "reps" ? " — " + pr.reps + " " + prUnit : " — " + pr.weight + " lb × " + pr.reps + " (est. 1RM " + pr.est1RM + " lb)"));
       });
     } else {
       lines.push("- none logged");
