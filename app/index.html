@@ -2346,6 +2346,19 @@
     renderSessionLog();
   }
 
+  // The reps-axis display unit for an exercise -- "sec" for a timed hold
+  // (Plank etc., metric "seconds"), "reps" otherwise. Pulled out as its own
+  // helper because this exact "reps" got hardcoded independently in three
+  // separate places (the digest's PR list, this exercise list, and the
+  // trend chart modal) before someone actually holding a Plank for real
+  // seconds surfaced two of them still saying "reps" after the first was
+  // already fixed -- one lookup now, used everywhere reps-axis history is
+  // displayed, so it can't drift out of sync again.
+  function repsAxisUnit(name) {
+    var entry = state.exercises[name];
+    return (entry && entry.metric === "seconds") ? "sec" : "reps";
+  }
+
   function renderExerciseList() {
     var el = $("#exerciseList");
     var names = L.listLoggedExercises(state);
@@ -2354,7 +2367,7 @@
       var history = L.buildExerciseHistory(state.sessions, name);
       var values = history.points.map(function (p) { return history.metric === "weight" ? p.est1RM : p.bestReps; });
       var best = values.length ? Math.max.apply(null, values) : 0;
-      var unit = history.metric === "weight" ? "lb e1RM" : "reps";
+      var unit = history.metric === "weight" ? "lb e1RM" : repsAxisUnit(name);
       var sessionWord = history.points.length === 1 ? "session" : "sessions";
       return '<div class="exercise-row" data-action="open-exercise-detail" data-exercise="' + esc(name) + '">' +
         '<span class="name">' + esc(name) + '</span>' +
@@ -3246,7 +3259,7 @@
   /* ---------- exercise history (progress trend) ---------- */
   function openExerciseDetailModal(name) {
     var history = L.buildExerciseHistory(state.sessions, name);
-    var unit = history.metric === "weight" ? "lb e1RM" : "reps";
+    var unit = history.metric === "weight" ? "lb e1RM" : repsAxisUnit(name);
     // Weighted exercises plot estimated one-rep max, not raw weight -- a
     // rep increase at the same weight (30lb x8 -> 30lb x12) is real
     // progress and needs to show as a rising line, not a flat one.
@@ -3266,7 +3279,7 @@
     var body =
       '<div class="modal-grip"></div>' +
       '<div class="modal-head"><h2>' + esc(name) + '</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
-      '<div class="muted" style="margin-bottom:10px;">' + (history.metric === "weight" ? "Estimated one-rep max per session" : "Best reps per session") + '</div>' +
+      '<div class="muted" style="margin-bottom:10px;">' + (history.metric === "weight" ? "Estimated one-rep max per session" : "Best " + unit + " per session") + '</div>' +
       chartHtml +
       (points.length ? '<div class="chart-readout" id="chartReadout">Tap a point to see its value.</div>' : "") +
       (points.length ? '<table class="exercise-history-table"><thead><tr><th>Date</th><th>Best</th></tr></thead><tbody>' + tableRows + "</tbody></table>" : "") +
