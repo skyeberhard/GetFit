@@ -106,13 +106,33 @@ function main() {
   const allBlankExceptSoreness = L.computeReadinessScore({ sleepScore: null, restingHR: null, soreness: 3 }, baselines);
   check("all fields blank except soreness scores purely from soreness", allBlankExceptSoreness === -1); // soreness 3 -> -1, per the table
 
-  /* ---- progression suggestion ---- */
+  /* ---- progression suggestion: rep-range before weight ---- */
   const loadedDef = { name: "Goblet Squat", metric: "reps", loaded: true, targetSets: 4, targetReps: 12 };
-  const hitTarget = L.suggestProgression(loadedDef, { weight: 30, reps: 12, targetReps: 12 });
-  check("hitting target on loaded exercise suggests more weight", hitTarget.weight > 30);
+  // Default rep-range ceiling with no explicit targetRepsMax is target+4 (16 here).
+  check("repRangeCeiling defaults to target+4 with no explicit max", L.repRangeCeiling(loadedDef) === 16);
+  const explicitCeilingDef = Object.assign({}, loadedDef, { targetRepsMax: 15 });
+  check("repRangeCeiling honors an explicit targetRepsMax", L.repRangeCeiling(explicitCeilingDef) === 15);
+
+  // Hit the floor but still below the rep-range ceiling -> build reps at the same weight.
+  const midRange = L.suggestProgression(loadedDef, { weight: 30, reps: 12, targetReps: 12 });
+  check("hitting floor below rep-range ceiling suggests +1 rep, not more weight", midRange.note === "progress +rep" && midRange.reps === 13 && midRange.weight === 30);
+
+  // Topped out the rep-range ceiling, no owned-weights configured -> falls back to the old % bump.
+  const toppedOutNoDumbbells = L.suggestProgression(loadedDef, { weight: 30, reps: 16, targetReps: 12 });
+  check("topping the rep range with no owned weights bumps weight (% fallback)", toppedOutNoDumbbells.note === "progress +weight" && toppedOutNoDumbbells.weight > 30);
+  check("weight bump resets reps back to the range floor", toppedOutNoDumbbells.reps === 12);
+
+  // Topped out the rep-range ceiling, owned weights configured -> snaps to the next one owned.
+  const ownedWeights = [20, 25, 30, 35, 40];
+  const toppedOutWithDumbbells = L.suggestProgression(loadedDef, { weight: 30, reps: 16, targetReps: 12 }, null, ownedWeights);
+  check("topping the rep range with owned weights snaps to the next one owned", toppedOutWithDumbbells.weight === 35 && toppedOutWithDumbbells.reps === 12);
+
+  // Already at the heaviest owned weight -> keeps progressing on reps instead of stalling.
+  const maxedWeight = L.suggestProgression(loadedDef, { weight: 40, reps: 16, targetReps: 12 }, null, ownedWeights);
+  check("maxed out heaviest owned weight keeps progressing on reps", maxedWeight.note === "progress +rep (maxed weight)" && maxedWeight.weight === 40 && maxedWeight.reps === 17);
 
   const missedTarget = L.suggestProgression(loadedDef, { weight: 30, reps: 9, targetReps: 12 });
-  check("missing target on loaded exercise repeats weight", missedTarget.weight === 30);
+  check("missing target on loaded exercise repeats weight", missedTarget.weight === 30 && missedTarget.reps === 12);
 
   const bodyweightDef = { name: "Push-Up", metric: "reps", loaded: false, targetSets: 4, targetReps: 15 };
   const bwHit = L.suggestProgression(bodyweightDef, { weight: 0, reps: 15, targetReps: 15 });
@@ -121,14 +141,26 @@ function main() {
   const noHistory = L.suggestProgression(loadedDef, null);
   check("no history falls back to target reps", noHistory.reps === loadedDef.targetReps);
 
+  /* ---- progression suggestion: readiness override ---- */
+  const holdSuppressed = L.suggestProgression(loadedDef, { weight: 30, reps: 12, targetReps: 12 }, "HOLD");
+  check("HOLD readiness suppresses an increase even after hitting the floor", holdSuppressed.weight === 30 && holdSuppressed.reps === 12 && holdSuppressed.note === "holding (readiness)");
+  const recoverySuppressed = L.suggestProgression(loadedDef, { weight: 30, reps: 16, targetReps: 12 }, "RECOVERY");
+  check("RECOVERY readiness suppresses a weight bump too", recoverySuppressed.weight === 30 && recoverySuppressed.note === "holding (readiness)");
+  const steadyUnaffected = L.suggestProgression(loadedDef, { weight: 30, reps: 12, targetReps: 12 }, "STEADY");
+  check("STEADY readiness does not suppress normal progression", steadyUnaffected.note === "progress +rep");
+  const bodyweightHoldSuppressed = L.suggestProgression(bodyweightDef, { weight: 0, reps: 15, targetReps: 15 }, "RECOVERY");
+  check("RECOVERY also suppresses bodyweight rep progression", bodyweightHoldSuppressed.reps === 15 && bodyweightHoldSuppressed.note === "holding (readiness)");
+
   /* ---- custom-exercise progression ("beat your last time") ---- */
   const noCustomHistory = L.suggestCustomProgression(null);
   check("suggestCustomProgression with no catalog entry reports no history", noCustomHistory.note === "no history");
 
+  // Custom exercises use last performance as their own target (targetReps = lastReps),
+  // so the same rep-range-before-weight rule applies: 10 reps against a floor of 10
+  // (ceiling 14) is still mid-range, so it suggests +1 rep at the same weight.
   const weightedCustomEntry = { name: "Farmer Carry", lastReps: 10, lastWeight: 40, loaded: true, metric: "reps" };
   const weightedCustomSuggestion = L.suggestCustomProgression(weightedCustomEntry);
-  check("weighted custom exercise always suggests progress (target = last time)", weightedCustomSuggestion.note === "progress +weight");
-  check("weighted custom exercise suggestion bumps the weight up from last time", weightedCustomSuggestion.weight > 40);
+  check("weighted custom exercise mid-range suggests +1 rep at the same weight", weightedCustomSuggestion.note === "progress +rep" && weightedCustomSuggestion.reps === 11 && weightedCustomSuggestion.weight === 40);
 
   const bodyweightCustomEntry = { name: "Wall Sit", lastReps: 45, lastWeight: 0, loaded: false, metric: "seconds" };
   const bodyweightCustomSuggestion = L.suggestCustomProgression(bodyweightCustomEntry);
@@ -187,12 +219,15 @@ function main() {
   check("v0->v1->v2 chain seeds templates from defaults", migrated.templates && migrated.templates.upperA.exercises.length > 0);
   check("v0->v1->v2 chain seeds longestStreak", migrated.longestStreak === 0);
 
-  // A v1 blob (has schemaVersion:1, no templates/longestStreak) should chain through v1->v2 only.
+  // A v1 blob (has schemaVersion:1, no templates/longestStreak) chains all the
+  // way through v2/v3/v4 too, since migrate() keeps applying the next step
+  // once a version matches -- it doesn't stop at "the next one up".
   const v1Blob = { schemaVersion: 1, xp: 50, restDays: [0], weekPlan: Object.assign({}, L.DEFAULT_WEEK_PLAN), weekOverrides: {}, baselines: L.DEFAULT_BASELINES, exercises: {}, sessions: [], readiness: {} };
   const fromV1 = L.migrate(v1Blob);
   check("v1->v2 migration adds templates", !!fromV1.templates);
   check("v1->v2 migration adds longestStreak", fromV1.longestStreak === 0);
   check("v1->v2 migration preserves existing xp", fromV1.xp === 50);
+  check("v1 blob chains all the way to the current schema version", fromV1.schemaVersion === L.SCHEMA_VERSION);
 
   // A v2 blob (has schemaVersion:2, catalog entries predating metric/loaded/
   // lastSetCount) should backfill those fields without losing existing data.
@@ -212,6 +247,32 @@ function main() {
   check("v2->v3 migration infers loaded=false when bestWeight was never > 0", fromV2.exercises["Wall Sit"].loaded === false);
   check("v2->v3 migration defaults metric to reps", fromV2.exercises["Farmer Carry"].metric === "reps");
   check("v2->v3 migration adds lastSetCount as null (unknown)", fromV2.exercises["Farmer Carry"].lastSetCount === null);
+  check("v2 blob also chains through v3->v4, adding ownedWeights", Array.isArray(fromV2.ownedWeights));
+  check("v2 blob's catalog gets a bestE1RM even with no session history (0)", fromV2.exercises["Farmer Carry"].bestE1RM === 0);
+
+  // A v3 blob (real weighted session history, but catalog entries predate
+  // bestE1RM) should backfill bestE1RM by rescanning that history -- not by
+  // deriving it from the existing bestWeight/bestReps fields, which can
+  // come from different sets and can't reconstruct which set actually
+  // produced the best estimated 1RM.
+  const v3Blob = {
+    schemaVersion: 3, xp: 200, restDays: [0, 4], weekPlan: Object.assign({}, L.DEFAULT_WEEK_PLAN),
+    weekOverrides: {}, baselines: L.DEFAULT_BASELINES, readiness: {},
+    templates: L.cloneTemplates(L.WORKOUT_TEMPLATES), longestStreak: 5,
+    exercises: {
+      "Goblet Squat": { name: "Goblet Squat", lastReps: 10, lastWeight: 30, bestWeight: 30, bestReps: 12, metric: "reps", loaded: true, lastSetCount: 3, updatedAt: "2026-08-15T00:00:00.000Z" }
+    },
+    sessions: [
+      { id: 1, date: "2026-08-01", dayLabel: "Lower", type: "workout", templateId: "lower", exercises: [{ name: "Goblet Squat", isCustom: false, sets: [{ reps: 8, weight: 25, cadenceMs: null }] }], cardio: null, xpEarned: 0, completedAt: "2026-08-01T00:00:00.000Z" },
+      { id: 2, date: "2026-08-08", dayLabel: "Lower", type: "workout", templateId: "lower", exercises: [{ name: "Goblet Squat", isCustom: false, sets: [{ reps: 12, weight: 30, cadenceMs: null }] }], cardio: null, xpEarned: 0, completedAt: "2026-08-08T00:00:00.000Z" }
+    ]
+  };
+  const fromV3 = L.migrate(v3Blob);
+  check("v3->v4 migration stamps current schema version", fromV3.schemaVersion === L.SCHEMA_VERSION);
+  const expectedE1RM = Math.round(30 * (1 + 12 / 30)); // best session was 30lb x12
+  check("v3->v4 migration backfills bestE1RM from session history", fromV3.exercises["Goblet Squat"].bestE1RM === expectedE1RM);
+  check("v3->v4 migration preserves existing catalog fields", fromV3.exercises["Goblet Squat"].lastWeight === 30);
+  check("v3->v4 migration defaults ownedWeights to an empty array", Array.isArray(fromV3.ownedWeights) && fromV3.ownedWeights.length === 0);
 
   const alreadyCurrent = L.migrate(L.freshState());
   check("migrating already-current state is a no-op passthrough", alreadyCurrent.schemaVersion === L.SCHEMA_VERSION);
@@ -254,8 +315,13 @@ function main() {
   fixtureState.exercises["Goblet Squat"] = { name: "Goblet Squat", lastReps: 12, lastWeight: 30, updatedAt: new Date().toISOString() };
   const squatDef = L.WORKOUT_TEMPLATES.lower.exercises.find((e) => e.name === "Goblet Squat");
   const squatVm = L.buildExerciseViewModel(squatDef, null, fixtureState.exercises);
-  check("exercise view-model pulls suggestion from catalog history", squatVm.suggestion.weight > 30);
+  check("exercise view-model pulls suggestion from catalog history", squatVm.suggestion.reps === 13 && squatVm.suggestion.weight === 30);
   check("exercise view-model pads sets to target count", squatVm.sets.length === squatDef.targetSets);
+
+  fixtureState.exercises["Goblet Squat Maxed"] = { name: "Goblet Squat Maxed", lastReps: 16, lastWeight: 30, updatedAt: new Date().toISOString() };
+  const squatMaxedDef = Object.assign({}, squatDef, { name: "Goblet Squat Maxed" });
+  const squatMaxedVm = L.buildExerciseViewModel(squatMaxedDef, null, fixtureState.exercises, null, [20, 25, 30, 35]);
+  check("exercise view-model passes readiness/ownedWeights through to progression", squatMaxedVm.suggestion.weight === 35);
 
   /* ---- day compliance / streak ---- */
   function buildCompleteWorkoutSession(date, template) {
@@ -326,6 +392,40 @@ function main() {
   // Tue and Wed intentionally skipped (training days, no session)
   const brokenStreak = L.computeStreakInfo(brokenStreakState, new Date("2026-09-25T09:00:00"));
   check("a gap on a training day breaks the streak", brokenStreak.throughYesterday < 4);
+
+  /* ---- computeLongestStreakEver: a persisted historical peak that
+     survives a later break, unlike state.longestStreak (which was never
+     actually written back anywhere -- see Store/app-shell) ---- */
+  check("computeLongestStreakEver scans the known activity window", L.computeLongestStreakEver(streakState, fridayMorning) === 5);
+
+  const historicalPeakState = L.freshState();
+  historicalPeakState.restDays = [0, 4];
+  const hpTemplates = historicalPeakState.templates;
+  historicalPeakState.sessions.push(buildCompleteWorkoutSession("2026-09-21", hpTemplates.upperA)); // Mon
+  historicalPeakState.sessions.push(buildCardioSession("2026-09-22", 30));                          // Tue
+  historicalPeakState.sessions.push(buildCompleteWorkoutSession("2026-09-23", hpTemplates.lower));  // Wed
+  // Thu 24th is a rest day -> auto-compliant, no session needed.
+  historicalPeakState.sessions.push(buildCompleteWorkoutSession("2026-09-25", hpTemplates.upperB)); // Fri
+  // Sat 26th (a training/cardio day) intentionally left unlogged -- breaks the run.
+  const muchLater = new Date("2026-10-02T09:00:00"); // the following Friday, well past the break
+  check("computeLongestStreakEver remembers a peak even after the streak later breaks", L.computeLongestStreakEver(historicalPeakState, muchLater) === 5);
+  check("meanwhile the live current streak has actually dropped well below the peak", L.computeStreakInfo(historicalPeakState, muchLater).current < 5);
+
+  /* ---- import validation: reject anything that isn't plausibly a TRAIN
+     backup, and any backup from a newer schema version than this app
+     supports, before migrate() is ever allowed to touch it ---- */
+  check("isTrainBackupShape accepts a real export shape", L.isTrainBackupShape(L.freshState()));
+  check("isTrainBackupShape rejects an unrelated JSON file", !L.isTrainBackupShape({ planChanges: { templates: {} } }));
+  check("isTrainBackupShape rejects null/non-object input", !L.isTrainBackupShape(null) && !L.isTrainBackupShape("hello") && !L.isTrainBackupShape([1, 2, 3]));
+
+  const validImport = L.validateImportPayload(L.freshState());
+  check("validateImportPayload accepts a real backup", validImport.valid === true);
+
+  const unrelatedImport = L.validateImportPayload({ planChanges: { templates: {} } });
+  check("validateImportPayload rejects an unrelated JSON file", unrelatedImport.valid === false && /doesn't look like/.test(unrelatedImport.error));
+
+  const futureImport = L.validateImportPayload(Object.assign({}, L.freshState(), { schemaVersion: L.SCHEMA_VERSION + 1 }));
+  check("validateImportPayload rejects a backup from a newer schema version", futureImport.valid === false && /newer version/.test(futureImport.error));
 
   /* ---- template snapshot: a later template/plan edit must not rewrite
      whether a past day counted, since the session already recorded what
@@ -471,6 +571,36 @@ function main() {
   const tooFewSessions = L.detectPlateaus(Object.assign({}, plateauState, { sessions: [plateauSessions[0]] }), 3);
   check("detectPlateaus says nothing when there's too little history", tooFewSessions.length === 0);
 
+  // Regression (workout fix #4): reps increasing at a constant weight is
+  // real progress and must not register as a plateau just because the raw
+  // weight number never moved -- the old comparison used raw best weight,
+  // which called 30lb x8 -> 30lb x12 "no progress."
+  const repProgressState = L.freshState();
+  const repProgressSessions = [
+    { date: "2026-08-01", exercises: [{ name: "Bench Press", sets: [{ reps: 8, weight: 30 }] }] },
+    { date: "2026-08-08", exercises: [{ name: "Bench Press", sets: [{ reps: 10, weight: 30 }] }] },
+    { date: "2026-08-15", exercises: [{ name: "Bench Press", sets: [{ reps: 12, weight: 30 }] }] }
+  ];
+  repProgressState.sessions = repProgressSessions;
+  repProgressState.exercises = {
+    "Bench Press": { name: "Bench Press", lastReps: 12, lastWeight: 30, bestWeight: 30, bestReps: 12, metric: "reps", loaded: true, updatedAt: "2026-08-15T00:00:00.000Z" }
+  };
+  const repProgressPlateaus = L.detectPlateaus(repProgressState, 3);
+  check("detectPlateaus does not flag rising reps at a constant weight as a plateau (est. 1RM)", !repProgressPlateaus.some((p) => p.exercise === "Bench Press"));
+
+  const repProgressPrs = L.countRecentPRs(repProgressSessions, "2026-08-02");
+  check("countRecentPRs credits a rep increase at the same weight as a PR (est. 1RM)", repProgressPrs.length === 2 && repProgressPrs.every((pr) => pr.weight === 30));
+
+  /* ---- estimated 1RM helpers ---- */
+  check("estimate1RM uses the Epley formula", L.estimate1RM(100, 10) === 100 * (1 + 10 / 30));
+  check("estimate1RM of a 1-rep set is just the weight", L.estimate1RM(135, 1) === 135 * (1 + 1 / 30));
+
+  const mixedSets = [{ reps: 8, weight: 30 }, { reps: 12, weight: 25 }, { reps: 5, weight: null }];
+  const bestSet = L.bestE1RMInSets(mixedSets);
+  // 30x8 -> e1rm 38; 25x12 -> e1rm 35; the unloaded set is ignored entirely.
+  check("bestE1RMInSets picks the set with the highest estimated 1RM, not the heaviest weight", bestSet.weight === 30 && bestSet.reps === 8);
+  check("bestE1RMInSets returns null when no set in the group was weighted", L.bestE1RMInSets([{ reps: 10, weight: 0 }, { reps: 12, weight: null }]) === null);
+
   /* ---- plan-change import: parse ---- */
   const validPayloadText = "Here's my advice...\n```json\n" + JSON.stringify({
     planChanges: {
@@ -534,6 +664,10 @@ function main() {
   check("buildExerciseHistory infers weight metric when any set has weight > 0", squatHistory.metric === "weight");
   check("buildExerciseHistory sorts points chronologically regardless of session order", squatHistory.points.map((p) => p.date).join(",") === "2026-08-01,2026-08-08,2026-08-15");
   check("buildExerciseHistory takes the best (max) weight set per session", squatHistory.points.map((p) => p.bestWeight).join(",") === "20,25,30");
+  // Aug 15 has two sets (10x22, 12x30) -- est1RM must be the best SET's
+  // 1RM (30x12 -> 42), not built by independently mixing the session's max
+  // weight (30) with its max reps (10, from the other set).
+  check("buildExerciseHistory's est1RM is the best single set's estimated 1RM per session", squatHistory.points.map((p) => p.est1RM).join(",") === "28,35,42");
 
   const pushupHistory = L.buildExerciseHistory(exHistSessions, "Push-Up");
   check("buildExerciseHistory infers reps metric when weight is never set", pushupHistory.metric === "reps");

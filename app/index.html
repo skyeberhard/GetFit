@@ -381,6 +381,14 @@
     </div>
 
     <div class="panel">
+      <h2>Dumbbells You Own</h2>
+      <div class="muted" style="margin-bottom:10px;">Weights in lb, comma-separated (e.g. "10, 15, 20, 25, 30"). Once topped out on an exercise's rep range, progression suggestions snap to the next weight here instead of an arbitrary number. Leave blank to fall back to a plain percentage bump.</div>
+      <input type="text" id="ownedWeights" inputmode="decimal" placeholder="10, 15, 20, 25, 30">
+      <div style="height:10px"></div>
+      <button class="btn primary block" data-action="save-owned-weights">Save</button>
+    </div>
+
+    <div class="panel">
       <h2>Data</h2>
       <div class="muted" style="margin-bottom:10px;">Export a full backup, restore from one, or pull a plain-text progress digest to hand to an AI for a check-in.</div>
       <div class="row" style="gap:8px;margin-bottom:8px;">
@@ -430,7 +438,7 @@
 (function (root) {
   "use strict";
 
-  var SCHEMA_VERSION = 3;
+  var SCHEMA_VERSION = 4;
 
   var WEEKDAY_LABELS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 
@@ -543,22 +551,74 @@
   }
 
   /* ---------- progression suggestion ---------- */
-  function suggestProgression(exerciseDef, lastPerf) {
+  // Top of an exercise's rep range: an explicit targetRepsMax on the
+  // exercise def if the template editor set one, else target+4 (a
+  // reasonable default working range) so untouched templates still get
+  // sensible rep-range progression for free.
+  function repRangeCeiling(exerciseDef) {
+    if (!exerciseDef) return 0;
+    return exerciseDef.targetRepsMax || (exerciseDef.targetReps + 4);
+  }
+
+  // Next weight, strictly heavier than currentWeight, that the user
+  // actually owns -- so a progression suggestion never lands on a plate/
+  // dumbbell they don't have. Returns null if there's no owned-weights
+  // list configured, or the current weight is already at/above the
+  // heaviest one owned.
+  function nextOwnedWeight(currentWeight, ownedWeights) {
+    if (!ownedWeights || !ownedWeights.length) return null;
+    var sorted = ownedWeights.slice().sort(function (a, b) { return a - b; });
+    for (var i = 0; i < sorted.length; i++) {
+      if (sorted[i] > currentWeight) return sorted[i];
+    }
+    return null;
+  }
+
+  // Rep-range progression: build reps up through the exercise's rep range
+  // at the same weight before adding load, and when weight does go up,
+  // snap to a weight the user actually owns (rather than an arbitrary 5%
+  // bump that may not correspond to anything on the rack). Falls back to
+  // the old percentage-based bump when no owned-weights list is
+  // configured, and once the heaviest owned weight is maxed out, keeps
+  // progressing on reps past the nominal ceiling instead of stalling.
+  //
+  // A HOLD or RECOVERY readiness verdict suppresses any increase for the
+  // day (weight or reps) regardless of what the numbers say -- readiness
+  // is a same-day override, not a replacement for the underlying
+  // progression scheme.
+  function suggestProgression(exerciseDef, lastPerf, readinessVerdict, ownedWeights) {
     if (!lastPerf) {
       return { weight: 0, reps: exerciseDef.targetReps, note: "no history" };
     }
-    var hitTarget = lastPerf.reps >= (lastPerf.targetReps || exerciseDef.targetReps);
+    var repFloor = exerciseDef.targetReps;
+    var repCeiling = repRangeCeiling(exerciseDef);
+    var hitFloor = lastPerf.reps >= (lastPerf.targetReps || repFloor);
+    var holdBack = readinessVerdict === "HOLD" || readinessVerdict === "RECOVERY";
+
     if (exerciseDef.loaded) {
-      if (hitTarget) {
-        var bump = lastPerf.weight > 0 ? Math.max(2.5, Math.round(lastPerf.weight * 0.05 * 2) / 2) : 5;
-        return { weight: round2(lastPerf.weight + bump), reps: exerciseDef.targetReps, note: "progress +weight" };
+      if (!hitFloor || holdBack) {
+        return { weight: lastPerf.weight, reps: repFloor, note: (holdBack && hitFloor) ? "holding (readiness)" : "repeat weight" };
       }
-      return { weight: lastPerf.weight, reps: exerciseDef.targetReps, note: "repeat weight" };
+      if (lastPerf.reps < repCeiling) {
+        // Still building toward the top of the rep range at this weight.
+        return { weight: lastPerf.weight, reps: Math.min(repCeiling, lastPerf.reps + 1), note: "progress +rep" };
+      }
+      var nextWeight = nextOwnedWeight(lastPerf.weight, ownedWeights);
+      if (nextWeight != null) {
+        return { weight: nextWeight, reps: repFloor, note: "progress +weight" };
+      }
+      if (!ownedWeights || !ownedWeights.length) {
+        var bump = lastPerf.weight > 0 ? Math.max(2.5, Math.round(lastPerf.weight * 0.05 * 2) / 2) : 5;
+        return { weight: round2(lastPerf.weight + bump), reps: repFloor, note: "progress +weight" };
+      }
+      // Topped out both the rep range and the heaviest owned weight --
+      // keep progressing on reps past the ceiling rather than stalling.
+      return { weight: lastPerf.weight, reps: lastPerf.reps + 1, note: "progress +rep (maxed weight)" };
     } else {
-      if (hitTarget) {
+      if (hitFloor && !holdBack) {
         return { weight: lastPerf.weight || 0, reps: lastPerf.reps + 1, note: "progress +rep" };
       }
-      return { weight: lastPerf.weight || 0, reps: exerciseDef.targetReps, note: "repeat target" };
+      return { weight: lastPerf.weight || 0, reps: repFloor, note: (holdBack && hitFloor) ? "holding (readiness)" : "repeat target" };
     }
   }
   function round2(n) { return Math.round(n * 100) / 100; }
@@ -567,13 +627,13 @@
   // own last performance, so this always resolves to a progress suggestion
   // (never "no history" once logged once). Returns the same shape as
   // suggestProgression with a note of "no history" when never logged.
-  function suggestCustomProgression(catalogEntry) {
+  function suggestCustomProgression(catalogEntry, readinessVerdict, ownedWeights) {
     if (!catalogEntry || !catalogEntry.lastReps) {
       return { weight: 0, reps: 0, note: "no history" };
     }
     var def = { loaded: !!catalogEntry.loaded, targetReps: catalogEntry.lastReps };
     var lastPerf = { weight: catalogEntry.lastWeight || 0, reps: catalogEntry.lastReps, targetReps: catalogEntry.lastReps };
-    return suggestProgression(def, lastPerf);
+    return suggestProgression(def, lastPerf, readinessVerdict, ownedWeights);
   }
 
   /* ---------- set completion ---------- */
@@ -719,6 +779,34 @@
     return { current: current, throughYesterday: count, todayCompliant: todayCompliant, longest: longest };
   }
 
+  // The true historical high-water mark, scanned day-by-day from the
+  // earliest recorded activity through today. state.longestStreak is only
+  // ever a floor (see computeStreakInfo, which just maxes the current
+  // streak against it) -- nothing previously wrote a new peak back to
+  // storage, so once a streak broke, its peak was gone for good the next
+  // time this ran. Recomputing the whole run from scratch (rather than
+  // trying to track a running maximum incrementally as the app goes) means
+  // there's never a peak that needed to be "remembered" before a later
+  // decline overwrote it.
+  function computeLongestStreakEver(state, now) {
+    now = now || new Date();
+    var earliest = null;
+    (state.sessions || []).forEach(function (s) { if (s.date && (!earliest || s.date < earliest)) earliest = s.date; });
+    Object.keys(state.readiness || {}).forEach(function (k) { if (!earliest || k < earliest) earliest = k; });
+    var stored = state.longestStreak || 0;
+    if (!earliest) return stored;
+
+    var cursor = new Date(earliest + "T00:00:00");
+    var todayKey = toDateKey(now);
+    var best = 0, run = 0;
+    for (var i = 0; i < 3650 && toDateKey(cursor) <= todayKey; i++) {
+      if (isDayCompliant(state, cursor)) { run++; if (run > best) best = run; }
+      else { run = 0; }
+      cursor = addDays(cursor, 1);
+    }
+    return Math.max(best, stored);
+  }
+
   // Only scheduled (non-rest) days count toward the denominator -- a rest
   // day is neither a hit nor a miss, so it shouldn't hand out free credit
   // toward a stat whose whole point is measuring whether you showed up.
@@ -737,28 +825,52 @@
   }
 
   /* ---------- PRs / attributes ---------- */
-  // A PR is a new best weight for a loaded performance, OR a new best
-  // reps/seconds for a bodyweight one (no weight logged that session) --
-  // otherwise bodyweight movements (Push-Up, Plank, etc.) could never
-  // register a PR at all, no matter how much they improved.
+  // Epley estimated one-rep max -- a standard approximation. Used (instead
+  // of raw weight) for PR/plateau detection and the trend chart so going
+  // from 30lb x8 to 30lb x12 registers as the real progress it is, rather
+  // than looking identical to no change at all because the weight number
+  // didn't move.
+  function estimate1RM(weight, reps) {
+    return weight * (1 + reps / 30);
+  }
+
+  // The best estimated 1RM among this exercise's filled, weighted sets --
+  // null if none were loaded (a bodyweight/timed performance). Shared by
+  // PR detection, plateau detection, the trend chart, and the live
+  // in-session PR check so they all agree on what "best" means.
+  function bestE1RMInSets(sets) {
+    var best = null;
+    (sets || []).filter(isSetFilled).forEach(function (s) {
+      if (s.weight && s.weight > 0) {
+        var e1rm = estimate1RM(s.weight, s.reps || 0);
+        if (!best || e1rm > best.e1rm) best = { e1rm: e1rm, weight: s.weight, reps: s.reps };
+      }
+    });
+    return best;
+  }
+
+  // A PR is a new best estimated 1RM for a loaded performance, OR a new
+  // best reps/seconds for a bodyweight one (no weight logged that
+  // session) -- otherwise bodyweight movements (Push-Up, Plank, etc.)
+  // could never register a PR at all, no matter how much they improved.
   function countRecentPRs(sessions, sinceDateKey) {
     var sorted = sessions.slice().sort(function (a, b) { return a.date.localeCompare(b.date); });
-    var bestWeight = {};
+    var bestE1RM = {};
     var bestReps = {};
     var prs = [];
     sorted.forEach(function (session) {
       (session.exercises || []).forEach(function (ex) {
         var filled = (ex.sets || []).filter(isSetFilled);
         if (!filled.length) return;
-        var maxWeight = filled.reduce(function (m, s) { return (s.weight && s.weight > m) ? s.weight : m; }, 0);
+        var loadedBest = bestE1RMInSets(ex.sets);
 
-        if (maxWeight > 0) {
-          var prevWeight = bestWeight[ex.name] || 0;
-          if (maxWeight > prevWeight) {
+        if (loadedBest) {
+          var prevE1RM = bestE1RM[ex.name] || 0;
+          if (loadedBest.e1rm > prevE1RM) {
             if (!sinceDateKey || session.date >= sinceDateKey) {
-              prs.push({ date: session.date, exercise: ex.name, type: "weight", weight: maxWeight });
+              prs.push({ date: session.date, exercise: ex.name, type: "weight", weight: loadedBest.weight, reps: loadedBest.reps, est1RM: Math.round(loadedBest.e1rm) });
             }
-            bestWeight[ex.name] = maxWeight;
+            bestE1RM[ex.name] = loadedBest.e1rm;
           }
         } else {
           var maxReps = filled.reduce(function (m, s) { return (s.reps && s.reps > m) ? s.reps : m; }, 0);
@@ -805,7 +917,11 @@
   // Best set per session, chronological. Metric is inferred from the data
   // itself (was any weight > 0 ever logged for this name) rather than a
   // stored "loaded" flag, so it works for both template and custom
-  // exercises regardless of how they were entered.
+  // exercises regardless of how they were entered. For a weighted
+  // exercise, the plotted/tracked value (est1RM) is the best estimated
+  // one-rep max across that session's sets, not raw weight or reps
+  // independently -- bestWeight/bestReps are kept alongside only for the
+  // raw-numbers table.
   function buildExerciseHistory(sessions, exerciseName) {
     var points = [];
     sessions.slice().sort(function (a, b) { return a.date.localeCompare(b.date); }).forEach(function (s) {
@@ -815,7 +931,8 @@
       if (!filled.length) return;
       var bestWeight = filled.reduce(function (m, set) { return (set.weight && set.weight > m) ? set.weight : m; }, 0);
       var bestReps = filled.reduce(function (m, set) { return (set.reps && set.reps > m) ? set.reps : m; }, 0);
-      points.push({ date: s.date, bestWeight: bestWeight, bestReps: bestReps });
+      var loadedBest = bestE1RMInSets(ex.sets);
+      points.push({ date: s.date, bestWeight: bestWeight, bestReps: bestReps, est1RM: loadedBest ? Math.round(loadedBest.e1rm) : 0 });
     });
     var everLoaded = points.some(function (p) { return p.bestWeight > 0; });
     return { exerciseName: exerciseName, metric: everLoaded ? "weight" : "reps", points: points };
@@ -843,7 +960,7 @@
       var history = buildExerciseHistory(state.sessions || [], name);
       if (history.points.length < windowSessions) return;
       var recent = history.points.slice(-windowSessions);
-      var values = recent.map(function (p) { return history.metric === "weight" ? p.bestWeight : p.bestReps; });
+      var values = recent.map(function (p) { return history.metric === "weight" ? p.est1RM : p.bestReps; });
       var maxInWindow = Math.max.apply(null, values);
       if (maxInWindow <= values[0]) {
         plateaus.push({
@@ -856,6 +973,37 @@
   }
 
   /* ---------- schema / migration ---------- */
+  // A minimal shape check to keep an unrelated JSON file -- a plan-changes
+  // export, a random download, anything that happens to parse -- from
+  // being silently reinterpreted as a legacy (schemaVersion 0) TRAIN
+  // backup and wiping existing data. Not exhaustive, just enough to catch
+  // "this obviously isn't a TRAIN backup": a real export always carries
+  // most of these top-level keys.
+  function isTrainBackupShape(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+    var coreKeys = ["sessions", "restDays", "weekPlan", "templates", "exercises", "readiness", "baselines"];
+    var present = coreKeys.filter(function (k) { return Object.prototype.hasOwnProperty.call(data, k); });
+    return present.length >= 3;
+  }
+
+  // Validates a parsed import file before migrate() is allowed to touch
+  // it. Catches two ways "Import JSON" used to be able to destroy data:
+  // picking an unrelated file (plan-change export, stray JSON) got
+  // reinterpreted as an empty legacy backup, and a backup from a NEWER
+  // app version got silently "downgraded" by migrate()'s version chain,
+  // which only ever upgrades and otherwise just stamps the current
+  // SCHEMA_VERSION over whatever was there.
+  function validateImportPayload(data) {
+    if (!isTrainBackupShape(data)) {
+      return { valid: false, error: "That file doesn't look like a TRAIN backup." };
+    }
+    var version = data.schemaVersion || 0;
+    if (version > SCHEMA_VERSION) {
+      return { valid: false, error: "That backup was made by a newer version of TRAIN (schema " + version + ", this app supports up to " + SCHEMA_VERSION + "). Update the app before importing it." };
+    }
+    return { valid: true };
+  }
+
   function migrate(data) {
     if (!data || typeof data !== "object") return freshState();
     var version = data.schemaVersion || 0;
@@ -872,6 +1020,10 @@
     if (version === 2) {
       state = migrateV2ToV3(state);
       version = 3;
+    }
+    if (version === 3) {
+      state = migrateV3ToV4(state);
+      version = 4;
     }
     state.schemaVersion = SCHEMA_VERSION;
     return state;
@@ -935,6 +1087,34 @@
     return next;
   }
 
+  // Adds `bestE1RM` (estimated one-rep max, Epley) to every catalog entry
+  // so PR/plateau detection and the trend chart can track a weighted
+  // exercise's real trend (e.g. 30lb x8 -> 30lb x12, genuine progress)
+  // instead of raw weight alone, which credited a rep increase at the same
+  // weight as no progress whatsoever. Backfilled by rescanning full
+  // session history rather than derived from the existing bestWeight/
+  // bestReps fields, since those are independently maxed across possibly
+  // different sets and can't tell us which set actually produced the best
+  // 1RM. Also adds `ownedWeights` (the user's actual dumbbells, used to
+  // snap progression suggestions to real equipment), defaulting to empty.
+  function migrateV3ToV4(state) {
+    var next = Object.assign({}, state);
+    var bestE1RM = {};
+    (next.sessions || []).slice().sort(function (a, b) { return a.date.localeCompare(b.date); }).forEach(function (session) {
+      (session.exercises || []).forEach(function (ex) {
+        var best = bestE1RMInSets(ex.sets);
+        if (best && best.e1rm > (bestE1RM[ex.name] || 0)) bestE1RM[ex.name] = best.e1rm;
+      });
+    });
+    var exercises = {};
+    Object.keys(next.exercises || {}).forEach(function (name) {
+      exercises[name] = Object.assign({}, next.exercises[name], { bestE1RM: Math.round(bestE1RM[name] || 0) });
+    });
+    next.exercises = exercises;
+    if (!Array.isArray(next.ownedWeights)) next.ownedWeights = [];
+    return next;
+  }
+
   function cloneTemplates(templates) {
     return JSON.parse(JSON.stringify(templates));
   }
@@ -965,6 +1145,7 @@
     state.schemaVersion = SCHEMA_VERSION;
     state.templates = cloneTemplates(WORKOUT_TEMPLATES);
     state.longestStreak = 0;
+    state.ownedWeights = [];
     return state;
   }
 
@@ -1198,14 +1379,14 @@
     };
   }
 
-  function buildExerciseViewModel(exerciseDef, session, exerciseCatalog) {
+  function buildExerciseViewModel(exerciseDef, session, exerciseCatalog, readinessVerdict, ownedWeights) {
     var existing = session && session.exercises ? session.exercises.filter(function (e) { return e.name === exerciseDef.name; })[0] : null;
     var sets = existing ? existing.sets.slice() : [];
     while (sets.length < exerciseDef.targetSets) sets.push({ reps: null, weight: null, cadenceMs: null });
 
     var catalogEntry = exerciseCatalog ? exerciseCatalog[exerciseDef.name] : null;
     var lastPerf = catalogEntry ? { weight: catalogEntry.lastWeight, reps: catalogEntry.lastReps, targetReps: exerciseDef.targetReps } : null;
-    var suggestion = suggestProgression(exerciseDef, lastPerf);
+    var suggestion = suggestProgression(exerciseDef, lastPerf, readinessVerdict, ownedWeights);
     var complete = allSetsComplete(sets, exerciseDef.targetSets);
 
     return { def: exerciseDef, sets: sets, suggestion: suggestion, complete: complete };
@@ -1259,7 +1440,7 @@
     lines.push("## PRs in the last 30 days");
     if (prs.length) {
       prs.slice(-15).forEach(function (pr) {
-        lines.push("- " + pr.date + ": " + pr.exercise + (pr.type === "reps" ? " — " + pr.reps + " reps" : " @ " + pr.weight + " lb"));
+        lines.push("- " + pr.date + ": " + pr.exercise + (pr.type === "reps" ? " — " + pr.reps + " reps" : " — " + pr.weight + " lb × " + pr.reps + " (est. 1RM " + pr.est1RM + " lb)"));
       });
     } else {
       lines.push("- none logged");
@@ -1269,7 +1450,7 @@
     lines.push("## Plateaued exercises (no net progress across the last 3 sessions)");
     if (plateaus.length) {
       plateaus.forEach(function (p) {
-        var unit = p.metric === "weight" ? "lb" : (state.exercises[p.exercise] && state.exercises[p.exercise].metric === "seconds" ? "sec" : "reps");
+        var unit = p.metric === "weight" ? "lb est. 1RM" : (state.exercises[p.exercise] && state.exercises[p.exercise].metric === "seconds" ? "sec" : "reps");
         lines.push("- " + p.exercise + ": stuck at " + p.value + " " + unit + " as of " + p.lastDate);
       });
     } else {
@@ -1326,6 +1507,8 @@
     isRestDay: isRestDay,
     longestConsecutiveRestRun: longestConsecutiveRestRun,
     validateRestDays: validateRestDays,
+    repRangeCeiling: repRangeCeiling,
+    nextOwnedWeight: nextOwnedWeight,
     suggestProgression: suggestProgression,
     suggestCustomProgression: suggestCustomProgression,
     isSetFilled: isSetFilled,
@@ -1339,10 +1522,15 @@
     computeReadinessVerdict: computeReadinessVerdict,
     isDayCompliant: isDayCompliant,
     computeStreakInfo: computeStreakInfo,
+    computeLongestStreakEver: computeLongestStreakEver,
     computeConsistency: computeConsistency,
+    estimate1RM: estimate1RM,
+    bestE1RMInSets: bestE1RMInSets,
     countRecentPRs: countRecentPRs,
     daysAgoKey: daysAgoKey,
     computeAttributes: computeAttributes,
+    isTrainBackupShape: isTrainBackupShape,
+    validateImportPayload: validateImportPayload,
     migrate: migrate,
     freshState: freshState,
     cloneTemplates: cloneTemplates,
@@ -1556,12 +1744,27 @@
   document.addEventListener("DOMContentLoaded", function () {
     Store.load().then(function (s) {
       state = s;
+      // Catch-up for accounts that already had a higher streak in their
+      // history than state.longestStreak ever recorded (see
+      // syncLongestStreak) -- runs once per load so a peak from before
+      // this existed isn't lost forever.
+      syncLongestStreak();
+      Store.save(state);
       render();
     });
     wireGlobalEvents();
   });
 
+  // Persists the real historical peak, not just today's current streak --
+  // state.longestStreak was previously never written anywhere, so once a
+  // streak broke, its peak was gone the next time anyone asked.
+  function syncLongestStreak() {
+    var longest = L.computeLongestStreakEver(state, new Date());
+    if (longest > (state.longestStreak || 0)) state.longestStreak = longest;
+  }
+
   function persistAndRerender() {
+    syncLongestStreak();
     Store.save(state);
     render();
   }
@@ -1688,6 +1891,15 @@
       restWarning = '<div class="banner">' + esc(vm.restValidation.warning) + "</div>";
     }
 
+    var readinessVerdict = vm.readinessToday ? vm.readinessToday.verdict : null;
+    // RECOVERY doesn't auto-swap anything -- it's a nudge, not a decision
+    // made for you -- but progression suggestions below are held at your
+    // last weight/reps either way (see suggestProgression), so say so.
+    var recoveryBanner = "";
+    if (readinessVerdict === "RECOVERY" && !vm.isRest) {
+      recoveryBanner = '<div class="banner">Readiness says RECOVERY today. Suggestions below are held at your last weight/reps — consider "Swap this day" to rest or light cardio instead.</div>';
+    }
+
     if (vm.isRest) {
       var cardioLogged = vm.todaySession && vm.todaySession.cardio;
       el.innerHTML = restWarning +
@@ -1713,7 +1925,7 @@
     var effectiveTemplate = (vm.todaySession && vm.todaySession.templateSnapshot) ? vm.todaySession.templateSnapshot : vm.template;
 
     if (effectiveTemplate.isCardio) {
-      el.innerHTML = restWarning +
+      el.innerHTML = restWarning + recoveryBanner +
         '<div class="panel">' +
         '<h2>' + esc(vm.template.label) + '<span class="tag">' + esc(dateTag) + '</span></h2>' +
         '<div class="muted" style="margin-bottom:10px;">Structured cardio. Pick a type and log duration/effort — runs & walks already come in through Garmin.</div>' +
@@ -1725,13 +1937,13 @@
     }
 
     var exVms = effectiveTemplate.exercises.map(function (def) {
-      return L.buildExerciseViewModel(def, vm.todaySession, state.exercises);
+      return L.buildExerciseViewModel(def, vm.todaySession, state.exercises, readinessVerdict, state.ownedWeights);
     });
     var allDone = exVms.every(function (e) { return e.complete; });
 
-    var html = restWarning +
+    var html = restWarning + recoveryBanner +
       '<div class="panel">' +
-      '<h2>' + esc(vm.template.label) + '<span class="tag">' + (allDone ? "Complete" : esc(dateTag)) + '</span></h2>' +
+      '<h2>' + esc(vm.template.label) + '<span class="tag" id="todayDateTag">' + (allDone ? "Complete" : esc(dateTag)) + '</span></h2>' +
       '<div style="margin-bottom:4px;"><button class="btn ghost sm" data-action="open-swap">Swap this day</button> ' +
       '<button class="btn ghost sm" data-action="open-custom-exercise">+ Custom Exercise</button></div>' +
       "</div>";
@@ -1741,7 +1953,7 @@
     var customEx = (vm.todaySession && vm.todaySession.exercises || []).filter(function (e) { return e.isCustom; });
     html += customEx.map(function (e) {
       var def = { name: e.name, metric: e.metric || "reps", loaded: e.loaded !== undefined ? e.loaded : true, targetSets: e.sets.length || 1, targetReps: 0 };
-      var suggestion = L.suggestCustomProgression(state.exercises[e.name]);
+      var suggestion = L.suggestCustomProgression(state.exercises[e.name], readinessVerdict, state.ownedWeights);
       var evm = { def: def, sets: e.sets, suggestion: suggestion, complete: L.allSetsComplete(e.sets, e.sets.length) };
       return renderExerciseCard(evm, true);
     }).join("");
@@ -1757,9 +1969,26 @@
       targetLine = evm.suggestion.note === "no history"
         ? def.targetSets + " sets · no history yet"
         : def.targetSets + " sets · suggested " + evm.suggestion.reps + " " + unit + (def.loaded ? " @ " + evm.suggestion.weight + " lb" : "") + " (" + evm.suggestion.note + ")";
+    } else if (def.loaded) {
+      // Show the rep range (floor–ceiling), not just the floor -- the
+      // suggestion builds reps up through that range before adding weight,
+      // so the range itself is part of what you're aiming for.
+      var ceiling = L.repRangeCeiling(def);
+      targetLine = def.targetSets + " × " + def.targetReps + "–" + ceiling + " " + unit +
+        " · suggested " + evm.suggestion.reps + " " + unit + " @ " + evm.suggestion.weight + " lb (" + evm.suggestion.note + ")";
     } else {
-      targetLine = def.targetSets + " × " + def.targetReps + " " + unit + (def.loaded ? " · suggested " + evm.suggestion.reps + " " + unit + " @ " + evm.suggestion.weight + " lb (" + evm.suggestion.note + ")" : " · bodyweight");
+      // Bodyweight exercises progress too (reps +1 once you hit target),
+      // but the suggestion was never actually shown for them before --
+      // it silently existed only in the data. Show it here so a readiness
+      // "holding" note or a rep bump is visible instead of invisible.
+      targetLine = def.targetSets + " × " + def.targetReps + " " + unit + " · bodyweight · suggested " + evm.suggestion.reps + " " + unit + " (" + evm.suggestion.note + ")";
     }
+
+    // The suggested reps/weight for this exercise, stashed on the card so
+    // tapping a set's checkmark (toggleSet) can fill in what was actually
+    // prescribed instead of a meaningless placeholder value.
+    var suggestedReps = evm.suggestion.reps > 0 ? evm.suggestion.reps : "";
+    var suggestedWeight = (def.loaded && evm.suggestion.weight > 0) ? evm.suggestion.weight : "";
 
     var rows = evm.sets.map(function (set, i) {
       var checked = L.isSetFilled(set);
@@ -1775,7 +2004,7 @@
         "</div>";
     }).join("");
 
-    return '<div class="exercise-card ' + (evm.complete ? "complete" : "") + '">' +
+    return '<div class="exercise-card ' + (evm.complete ? "complete" : "") + '" data-exercise="' + esc(def.name) + '" data-suggested-reps="' + esc(suggestedReps) + '" data-suggested-weight="' + esc(suggestedWeight) + '">' +
       "<h3>" + esc(def.name) + (isCustom ? ' <span class="faint">custom</span>' : "") + "</h3>" +
       '<div class="target">' + targetLine + "</div>" + rows + "</div>";
   }
@@ -1839,9 +2068,9 @@
     if (!names.length) { el.innerHTML = '<div class="empty">Log an exercise to see its trend here.</div>'; return; }
     el.innerHTML = names.map(function (name) {
       var history = L.buildExerciseHistory(state.sessions, name);
-      var values = history.points.map(function (p) { return history.metric === "weight" ? p.bestWeight : p.bestReps; });
+      var values = history.points.map(function (p) { return history.metric === "weight" ? p.est1RM : p.bestReps; });
       var best = values.length ? Math.max.apply(null, values) : 0;
-      var unit = history.metric === "weight" ? "lb" : "reps";
+      var unit = history.metric === "weight" ? "lb e1RM" : "reps";
       var sessionWord = history.points.length === 1 ? "session" : "sessions";
       return '<div class="exercise-row" data-action="open-exercise-detail" data-exercise="' + esc(name) + '">' +
         '<span class="name">' + esc(name) + '</span>' +
@@ -1911,6 +2140,7 @@
       case "toggle-set": return toggleSet(el);
       case "cadence-toggle": return toggleCadence(el);
       case "save-baselines": return saveBaselines();
+      case "save-owned-weights": return saveOwnedWeights();
       case "export-data": return exportData();
       case "import-data": return $("#importFile").click();
       case "submit-readiness": return submitReadiness();
@@ -1974,6 +2204,7 @@
 
     debounce("set-" + exerciseName + "-" + setIdx, function () {
       maybeAutoCompleteExercise(session, exerciseName);
+      syncLongestStreak();
       Store.save(state);
     }, 400);
   }
@@ -1995,36 +2226,49 @@
     var def = effectiveTemplate && effectiveTemplate.exercises ? effectiveTemplate.exercises.find(function (d) { return d.name === exerciseName; }) : null;
     var exEntry = session.exercises.find(function (e) { return e.name === exerciseName; });
     var targetSets = def ? def.targetSets : exEntry.sets.length;
-    var wasComplete = exEntry._wasComplete;
     var nowComplete = L.allSetsComplete(exEntry.sets, targetSets);
+
+    // XP (and any PR bonus) for an exercise is awarded once per session,
+    // ever -- not once per "just became complete" transition. It used to
+    // key off _wasComplete, a transient flag: clearing one set and
+    // refilling it flipped the exercise incomplete-then-complete again and
+    // re-paid the same XP/PR bonus every time, indefinitely. _xpAwarded is
+    // permanent once set. A session logged before this fix has no
+    // _xpAwarded yet -- seed it from the old _wasComplete flag so an
+    // already-completed exercise isn't double-paid the next time it's
+    // touched, without needing a schema migration for it.
+    if (exEntry._xpAwarded === undefined) exEntry._xpAwarded = !!exEntry._wasComplete;
 
     // Streak bonus is evaluated against the real live streak (not viewDate)
     // -- backfilling a missed day can legitimately extend today's actual
     // streak, and that's the moment worth celebrating.
     var streakBefore = L.computeStreakInfo(state, new Date());
 
-    if (nowComplete && !wasComplete) {
+    if (nowComplete && !exEntry._xpAwarded) {
       var catalogPrev = state.exercises[exerciseName];
       var setsThisExercise = exEntry.sets.slice(0, targetSets);
-      // A session with any weight logged is judged as a loaded performance
-      // (weight is the progression axis); otherwise it's bodyweight/timed,
-      // where reps (or seconds, same field) are the axis instead. Matches
-      // countRecentPRs so the "New PR!" toast and the Strength attribute
-      // agree on what counts as a PR.
-      var maxWeightThisTime = setsThisExercise.reduce(function (m, s) { return (s.weight && s.weight > m) ? s.weight : m; }, 0);
+      // A session with any weighted set is judged as a loaded performance
+      // (estimated 1RM is the progression axis); otherwise it's bodyweight/
+      // timed, where reps (or seconds, same field) are the axis instead.
+      // Mirrors countRecentPRs so the "New PR!" toast and the Strength
+      // attribute agree on what counts as a PR.
+      var loadedBest = L.bestE1RMInSets(setsThisExercise);
       var prCount;
-      if (maxWeightThisTime > 0) {
-        var prevBestWeight = catalogPrev ? (catalogPrev.bestWeight || 0) : 0;
-        prCount = setsThisExercise.filter(function (s) { return s.weight && s.weight > prevBestWeight; }).length;
+      if (loadedBest) {
+        var prevBestE1RM = catalogPrev ? (catalogPrev.bestE1RM || 0) : 0;
+        prCount = setsThisExercise.filter(function (s) {
+          return s.weight && s.weight > 0 && L.estimate1RM(s.weight, s.reps || 0) > prevBestE1RM;
+        }).length;
       } else {
         var prevBestReps = catalogPrev ? (catalogPrev.bestReps || 0) : 0;
         prCount = setsThisExercise.filter(function (s) { return s.reps && s.reps > prevBestReps; }).length;
       }
 
-      var xp = exEntry.sets.slice(0, targetSets).reduce(function (sum, s) { return sum + L.xpForSet(s, def); }, 0);
+      var xp = setsThisExercise.reduce(function (sum, s) { return sum + L.xpForSet(s, def); }, 0);
       xp += prCount * L.PR_BONUS_XP;
       awardXp(xp, prCount > 0 ? (def ? def.name : exerciseName) + " • New PR!" : (def ? def.name : exerciseName));
       session.xpEarned = (session.xpEarned || 0) + xp;
+      exEntry._xpAwarded = true;
       updateExerciseCatalog(exerciseName, exEntry);
       checkWorkoutComplete(session, effectiveTemplate);
     } else {
@@ -2040,7 +2284,55 @@
       }, 900);
     }
 
-    render();
+    refreshTodayLite(session, effectiveTemplate);
+  }
+
+  // A lighter-weight refresh for the "typed into a set" path -- patches
+  // the pieces that can actually have changed (checkmarks, each exercise
+  // card's "complete" class, the day header tag, the day strip, top
+  // chips) without renderTodayContent's full innerHTML rebuild of the
+  // exercise cards, which would steal focus out from under whatever
+  // input you're still typing into (and, on Android, close the keyboard
+  // along with it). Everything else still gets a normal full re-render --
+  // only Today's exercise cards are DOM-patched in place.
+  function refreshTodayLite(session, effectiveTemplate) {
+    renderTopChips();
+    var vm = L.buildTodayViewModel(state, viewDate);
+    renderWeekNav(vm);
+    renderDayStrip(vm);
+    renderReadinessPanel(vm);
+    patchExerciseCards(session, effectiveTemplate, vm);
+    renderProgress();
+    renderSettings();
+  }
+
+  function patchExerciseCards(session, effectiveTemplate, vm) {
+    $all(".exercise-card").forEach(function (card) {
+      var name = card.dataset.exercise;
+      var exEntry = (session.exercises || []).find(function (e) { return e.name === name; });
+      if (!exEntry) return;
+      var def = effectiveTemplate && effectiveTemplate.exercises ? effectiveTemplate.exercises.find(function (d) { return d.name === name; }) : null;
+      var targetSets = def ? def.targetSets : exEntry.sets.length;
+      exEntry.sets.forEach(function (set, i) {
+        var row = card.querySelector('.set-row[data-set="' + i + '"]');
+        var chk = row && row.querySelector(".chk");
+        if (!chk) return;
+        var filled = L.isSetFilled(set);
+        chk.classList.toggle("on", filled);
+        chk.textContent = filled ? "✓" : "";
+      });
+      card.classList.toggle("complete", L.allSetsComplete(exEntry.sets, targetSets));
+    });
+
+    var dateTagEl = $("#todayDateTag");
+    if (dateTagEl && effectiveTemplate && !effectiveTemplate.isCardio) {
+      var allDone = effectiveTemplate.exercises.every(function (def) {
+        var e = session.exercises.find(function (x) { return x.name === def.name; });
+        return e && L.allSetsComplete(e.sets, def.targetSets);
+      });
+      var dateTag = isRealToday(vm.dateKey) ? "Today" : formatDateLabel(vm.dateKey);
+      dateTagEl.textContent = allDone ? "Complete" : dateTag;
+    }
   }
 
   function checkWorkoutComplete(session, effectiveTemplate) {
@@ -2073,12 +2365,18 @@
     // this session (the weight actually being worked at), not whichever set
     // happened to be filled last.
     var minRepsInSession = filled.reduce(function (m, s) { return s.reps < m ? s.reps : m; }, filled[0].reps);
+    var loadedBestThisSession = L.bestE1RMInSets(exEntry.sets);
     state.exercises[name] = {
       name: name,
       lastReps: minRepsInSession,
       lastWeight: maxWeightInSession,
       bestWeight: Math.max((prev && prev.bestWeight) || 0, maxWeightInSession),
       bestReps: Math.max((prev && prev.bestReps) || 0, maxRepsInSession),
+      // Estimated 1RM (Epley), tracked alongside raw bestWeight -- this is
+      // what PR/plateau detection actually compares against, since it
+      // credits a rep increase at the same weight as the real progress it
+      // is (see estimate1RM).
+      bestE1RM: Math.max((prev && prev.bestE1RM) || 0, loadedBestThisSession ? Math.round(loadedBestThisSession.e1rm) : 0),
       metric: exEntry.metric || (prev && prev.metric) || "reps",
       loaded: exEntry.loaded !== undefined ? exEntry.loaded : ((prev && prev.loaded) || maxWeightInSession > 0),
       lastSetCount: exEntry.sets.length,
@@ -2086,8 +2384,14 @@
     };
   }
 
+  // Tapping the checkmark fills in what was actually prescribed for this
+  // exercise (the suggested reps/weight stashed on the card by
+  // renderExerciseCard), not a meaningless placeholder -- a bare "1 rep"
+  // used to get recorded as the set's real value, which then became this
+  // session's worst set and skewed progression, PRs, and the trend chart.
   function toggleSet(chkEl) {
     var row = chkEl.closest(".set-row");
+    var card = chkEl.closest(".exercise-card");
     var repsInput = row.querySelector('input[data-field="reps"]');
     if (!repsInput) return;
     var currentlyFilled = repsInput.value !== "";
@@ -2096,7 +2400,11 @@
       var weightInput = row.querySelector('input[data-field="weight"]');
       if (weightInput) weightInput.value = "";
     } else if (!repsInput.value) {
-      repsInput.value = repsInput.placeholder === "sec" ? "45" : "1";
+      var suggestedReps = card ? card.dataset.suggestedReps : "";
+      var suggestedWeight = card ? card.dataset.suggestedWeight : "";
+      repsInput.value = suggestedReps || (repsInput.placeholder === "sec" ? "45" : "1");
+      var weightInputToFill = row.querySelector('input[data-field="weight"]');
+      if (weightInputToFill && !weightInputToFill.value && suggestedWeight) weightInputToFill.value = suggestedWeight;
     }
     repsInput.dispatchEvent(new Event("input", { bubbles: true }));
     if (row.querySelector('input[data-field="weight"]')) {
@@ -2207,7 +2515,12 @@
     $("#readinessResult").innerHTML =
       '<div class="row"><span class="pill ' + result.verdict.toLowerCase() + '">' + result.verdict + '</span>' +
       '<button class="btn ghost sm" data-action="open-readiness">Re-check</button></div>';
-    renderReadinessPanel(L.buildTodayViewModel(state, viewDate));
+    // A full renderToday(), not just the readiness panel -- HOLD/RECOVERY
+    // changes what the exercise cards behind this modal suggest (see
+    // suggestProgression) and can show a RECOVERY banner, so the day's
+    // content needs to reflect the verdict as soon as it's known, not just
+    // the next time something else happens to trigger a render.
+    renderToday();
   }
 
   /* ---------- swap modal ---------- */
@@ -2344,6 +2657,19 @@
     $("#baseRHR").value = state.baselines.restingHR;
     $("#baseSleepGood").value = state.baselines.sleepGood;
     $("#baseSleepLow").value = state.baselines.sleepLow;
+
+    $("#ownedWeights").value = (state.ownedWeights || []).join(", ");
+  }
+
+  function saveOwnedWeights() {
+    var raw = $("#ownedWeights").value || "";
+    var weights = raw.split(",")
+      .map(function (s) { return Number(s.trim()); })
+      .filter(function (n) { return !isNaN(n) && n > 0; });
+    // De-duplicate and sort -- nextOwnedWeight assumes a clean ascending
+    // list, and typos ("20, 20, 25") shouldn't produce a duplicate rung.
+    state.ownedWeights = weights.filter(function (n, i) { return weights.indexOf(n) === i; }).sort(function (a, b) { return a - b; });
+    persistAndRerender();
   }
 
   function renderRestDayToggle() {
@@ -2419,6 +2745,10 @@
         '<div><label class="field-label">Target</label><input type="number" data-field="targetReps" value="' + def.targetReps + '"></div>' +
         '<div><label class="field-label">Unit</label>' + renderFselect("tmpl-metric-" + i, METRIC_OPTIONS, def.metric) + "</div>" +
         "</div>" +
+        (def.loaded ?
+          '<div style="margin-top:8px;"><label class="field-label">Max reps (top of rep range, before adding weight — blank = target+4)</label>' +
+          '<input type="number" data-field="targetRepsMax" value="' + (def.targetRepsMax || "") + '" placeholder="' + (def.targetReps + 4) + '"></div>'
+          : "") +
         '<div class="row" style="margin-top:8px;">' +
         '<label class="muted" style="display:flex;align-items:center;gap:6px;"><input type="checkbox" data-field="loaded"' + (def.loaded ? " checked" : "") + '> Weighted</label>' +
         '<div class="actions">' +
@@ -2439,6 +2769,7 @@
           // with nothing logged, which would falsely mark the exercise (and
           // potentially the whole day, feeding the streak) complete.
           else if (field === "targetSets" || field === "targetReps") value = Math.max(1, Number(fieldEl.value) || 0);
+          else if (field === "targetRepsMax") value = fieldEl.value === "" ? undefined : Math.max(1, Number(fieldEl.value) || 0);
           else value = fieldEl.value;
           var patch = {};
           patch[field] = value;
@@ -2601,9 +2932,12 @@
   /* ---------- exercise history (progress trend) ---------- */
   function openExerciseDetailModal(name) {
     var history = L.buildExerciseHistory(state.sessions, name);
-    var unit = history.metric === "weight" ? "lb" : "reps";
+    var unit = history.metric === "weight" ? "lb e1RM" : "reps";
+    // Weighted exercises plot estimated one-rep max, not raw weight -- a
+    // rep increase at the same weight (30lb x8 -> 30lb x12) is real
+    // progress and needs to show as a rising line, not a flat one.
     var points = history.points.map(function (p) {
-      return { date: p.date, value: history.metric === "weight" ? p.bestWeight : p.bestReps };
+      return { date: p.date, value: history.metric === "weight" ? p.est1RM : p.bestReps };
     });
 
     var chartHtml = points.length
@@ -2618,7 +2952,7 @@
     var body =
       '<div class="modal-grip"></div>' +
       '<div class="modal-head"><h2>' + esc(name) + '</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
-      '<div class="muted" style="margin-bottom:10px;">' + (history.metric === "weight" ? "Best weight per session" : "Best reps per session") + '</div>' +
+      '<div class="muted" style="margin-bottom:10px;">' + (history.metric === "weight" ? "Estimated one-rep max per session" : "Best reps per session") + '</div>' +
       chartHtml +
       (points.length ? '<div class="chart-readout" id="chartReadout">Tap a point to see its value.</div>' : "") +
       (points.length ? '<table class="exercise-history-table"><thead><tr><th>Date</th><th>Best</th></tr></thead><tbody>' + tableRows + "</tbody></table>" : "") +
@@ -2691,35 +3025,57 @@
   }
 
   /* ---------- export / import ---------- */
-  function exportData() {
-    var blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+  function downloadJsonBackup(data, filenamePrefix) {
+    var blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
     a.href = url;
-    a.download = "train-export-" + L.toDateKey(new Date()) + ".json";
+    a.download = filenamePrefix + L.toDateKey(new Date()) + ".json";
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
   }
 
+  function exportData() {
+    downloadJsonBackup(state, "train-export-");
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     $("#importFile").addEventListener("change", function (e) {
       var file = e.target.files[0];
       if (!file) return;
-      if (!confirm("Importing will replace all current data on this device. Continue?")) {
+      if (!confirm("Importing will replace all current data on this device. A backup of your current data will download automatically first. Continue?")) {
         e.target.value = "";
         return;
       }
       var reader = new FileReader();
       reader.onload = function () {
+        var parsed;
         try {
-          var parsed = JSON.parse(reader.result);
-          state = L.migrate(parsed);
-          persistAndRerender();
+          parsed = JSON.parse(reader.result);
         } catch (err) {
-          alert("Could not read that file — not valid TRAIN export JSON.");
+          alert("Could not read that file — not valid JSON.");
+          e.target.value = "";
+          return;
         }
+        // Reject anything that isn't plausibly a TRAIN backup (a stray
+        // file, a plan-changes export) and anything from a newer app
+        // version than this one understands -- migrate() only ever
+        // upgrades, so a newer backup previously got silently
+        // "downgraded" instead of rejected. See validateImportPayload.
+        var check = L.validateImportPayload(parsed);
+        if (!check.valid) {
+          alert(check.error);
+          e.target.value = "";
+          return;
+        }
+        // A backup of what's about to be overwritten, downloaded
+        // automatically -- importing used to be one bad file pick away
+        // from silently erasing everything with no way back.
+        downloadJsonBackup(state, "train-pre-import-backup-");
+        state = L.migrate(parsed);
+        persistAndRerender();
       };
       reader.readAsText(file);
       e.target.value = "";
