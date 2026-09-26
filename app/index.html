@@ -1505,13 +1505,18 @@
      Expected shape (fenced ```json``` or bare JSON, from an AI's digest
      response):
        { "planChanges": {
-           "templates": { "<templateId>": { "exercises": [
+           "templates": { "<templateId>": { "label": "...", "exercises": [
              { "name": "...", "metric": "reps"|"seconds", "loaded": bool,
-               "targetSets": n, "targetReps": n }, ... ] } },
-           "weekPlan": { "<weekday 0-6>": "<templateId>" } } }
-     Only EXISTING template ids can be edited this way -- no new templates
-     are created, matching what Settings' own editor already allows. Never
-     applied without the caller showing a diff and getting confirmation. ---- */
+               "targetSets": n, "targetReps": n, "targetRepsMax": n }, ... ] } },
+           "weekPlan": { "<weekday 0-6>": "<templateId>" },
+           "restDays": [<weekday 0-6>, ...] } }
+     "label" renames an existing template, or -- for an id that doesn't
+     exist yet -- creates a new one (a new id with no label is rejected,
+     so a typo'd id can't silently spawn a stray template). Mirrors what
+     Settings' own editor allows: add/rename templates, edit exercise
+     lists, reassign weekdays, set rest days. The cardio template has no
+     exercise list and can't be edited this way. Never applied without
+     the caller showing a diff and getting confirmation. ---- */
   function extractJsonBlock(text) {
     if (typeof text !== "string") return null;
     var fenced = text.match(/```json\s*([\s\S]*?)```/i);
@@ -1525,14 +1530,26 @@
 
   function sanitizeExerciseDef(raw) {
     if (!raw || typeof raw.name !== "string" || !raw.name.trim()) return null;
-    return {
+    var def = {
       name: raw.name.trim(),
       metric: raw.metric === "seconds" ? "seconds" : "reps",
       loaded: raw.loaded !== false,
       targetSets: Math.max(1, Math.round(Number(raw.targetSets)) || 0) || 1,
       targetReps: Math.max(1, Math.round(Number(raw.targetReps)) || 0) || 1
     };
+    // Only meaningful as the top of a weighted exercise's rep range (see
+    // repRangeCeiling), and only if it's actually above the floor.
+    var max = Math.round(Number(raw.targetRepsMax));
+    if (def.loaded && max > def.targetReps) def.targetRepsMax = max;
+    return def;
   }
+
+  function formatExerciseTarget(e) {
+    var unit = e.metric === "seconds" ? "sec" : "reps";
+    return e.targetSets + "×" + e.targetReps + (e.targetRepsMax ? "–" + e.targetRepsMax : "") + " " + unit;
+  }
+
+  var TEMPLATE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
   // validIds defaults to the built-in templates' ids so existing callers
   // (and tests) that don't have a state handy keep working -- pass the
@@ -1546,28 +1563,46 @@
       return { valid: false, errors: ["Could not find valid JSON in that text."], payload: null };
     }
     var changes = parsed.planChanges || parsed; // tolerate a bare {templates,weekPlan} too
+    var existingTemplates = state ? getTemplates(state) : WORKOUT_TEMPLATES;
     var templates = {};
+    var labels = {};
     var weekPlan = {};
+    var restDays = null;
 
     if (changes.templates && typeof changes.templates === "object") {
       Object.keys(changes.templates).forEach(function (templateId) {
-        if (validIds.indexOf(templateId) === -1) {
-          errors.push('Unknown template "' + templateId + '" — skipped. Only existing templates (' + validIds.join(", ") + ") can be edited this way.");
+        var entry = changes.templates[templateId] || {};
+        var label = typeof entry.label === "string" ? entry.label.trim() : "";
+        var isExisting = validIds.indexOf(templateId) !== -1;
+        if (!isExisting) {
+          if (!label) {
+            errors.push('Unknown template "' + templateId + '" — skipped. Existing templates are ' + validIds.join(", ") + '; to create a new one, give it a "label".');
+            return;
+          }
+          if (!TEMPLATE_ID_PATTERN.test(templateId)) {
+            errors.push('New template id "' + templateId + '" must be lowercase letters, numbers, and dashes — skipped.');
+            return;
+          }
+        } else if (existingTemplates[templateId] && existingTemplates[templateId].isCardio) {
+          errors.push('"' + templateId + '" is the cardio template — it has no exercise list to edit — skipped.');
           return;
         }
-        var rawExercises = changes.templates[templateId] && changes.templates[templateId].exercises;
-        if (!Array.isArray(rawExercises)) {
+        if (!Array.isArray(entry.exercises)) {
           errors.push('Template "' + templateId + '" has no exercises array — skipped.');
           return;
         }
-        var cleaned = rawExercises.map(sanitizeExerciseDef).filter(Boolean);
+        var cleaned = entry.exercises.map(sanitizeExerciseDef).filter(Boolean);
         if (!cleaned.length) {
           errors.push('Template "' + templateId + '" had no valid exercises after validation — skipped.');
           return;
         }
         templates[templateId] = cleaned;
+        if (label) labels[templateId] = label;
       });
     }
+
+    // A weekday may point at a template this same payload creates.
+    var assignableIds = validIds.concat(Object.keys(templates).filter(function (id) { return validIds.indexOf(id) === -1; }));
 
     if (changes.weekPlan && typeof changes.weekPlan === "object") {
       Object.keys(changes.weekPlan).forEach(function (dayKey) {
@@ -1577,7 +1612,7 @@
           errors.push('Invalid weekday "' + dayKey + '" — skipped.');
           return;
         }
-        if (validIds.indexOf(templateId) === -1) {
+        if (assignableIds.indexOf(templateId) === -1) {
           errors.push('Unknown template "' + templateId + '" for ' + WEEKDAY_LABELS[day] + ' — skipped.');
           return;
         }
@@ -1585,20 +1620,30 @@
       });
     }
 
-    var hasAnything = Object.keys(templates).length > 0 || Object.keys(weekPlan).length > 0;
+    if (changes.restDays !== undefined) {
+      var days = Array.isArray(changes.restDays) ? changes.restDays.map(Number).filter(function (d, i, arr) {
+        return d >= 0 && d <= 6 && Math.floor(d) === d && arr.indexOf(d) === i;
+      }).sort() : [];
+      var restCheck = validateRestDays(days);
+      if (!restCheck.valid) errors.push("restDays: " + restCheck.errors.join(" ") + " — skipped.");
+      else restDays = days;
+    }
+
+    var hasAnything = Object.keys(templates).length > 0 || Object.keys(weekPlan).length > 0 || !!restDays;
     if (!hasAnything && !errors.length) {
-      errors.push("No template or weekly-plan changes found in that text.");
+      errors.push("No template, weekly-plan, or rest-day changes found in that text.");
     }
 
     return {
       valid: hasAnything,
       errors: errors,
-      payload: hasAnything ? { templates: templates, weekPlan: weekPlan } : null
+      payload: hasAnything ? { templates: templates, labels: labels, weekPlan: weekPlan, restDays: restDays } : null
     };
   }
 
   function diffPlanChanges(state, payload) {
     var templates = getTemplates(state);
+    var labels = payload.labels || {};
     var changes = [];
 
     Object.keys(payload.templates || {}).forEach(function (templateId) {
@@ -1611,14 +1656,15 @@
       newExercises.forEach(function (e) { newByName[e.name] = e; });
 
       var lines = [];
+      if (oldTemplate && labels[templateId] && labels[templateId] !== oldTemplate.label) {
+        lines.push("Renamed: " + oldTemplate.label + " → " + labels[templateId]);
+      }
       newExercises.forEach(function (ne) {
         var oe = oldByName[ne.name];
-        var newUnit = ne.metric === "seconds" ? "sec" : "reps";
         if (!oe) {
-          lines.push("+ Added: " + ne.name + " (" + ne.targetSets + "×" + ne.targetReps + " " + newUnit + (ne.loaded ? "" : ", bodyweight") + ")");
-        } else if (oe.targetSets !== ne.targetSets || oe.targetReps !== ne.targetReps || oe.metric !== ne.metric || oe.loaded !== ne.loaded) {
-          var oldUnit = oe.metric === "seconds" ? "sec" : "reps";
-          lines.push(ne.name + ": " + oe.targetSets + "×" + oe.targetReps + " " + oldUnit + " → " + ne.targetSets + "×" + ne.targetReps + " " + newUnit);
+          lines.push("+ Added: " + ne.name + " (" + formatExerciseTarget(ne) + (ne.loaded ? "" : ", bodyweight") + ")");
+        } else if (oe.targetSets !== ne.targetSets || oe.targetReps !== ne.targetReps || oe.metric !== ne.metric || oe.loaded !== ne.loaded || (oe.targetRepsMax || null) !== (ne.targetRepsMax || null)) {
+          lines.push(ne.name + ": " + formatExerciseTarget(oe) + " → " + formatExerciseTarget(ne));
         }
       });
       oldExercises.forEach(function (oe) {
@@ -1626,10 +1672,24 @@
       });
 
       changes.push({
-        type: "template", templateId: templateId, label: (oldTemplate && oldTemplate.label) || templateId,
+        type: "template", templateId: templateId, isNew: !oldTemplate,
+        label: oldTemplate ? (labels[templateId] || oldTemplate.label) : "New template: " + (labels[templateId] || templateId),
         lines: lines.length ? lines : ["No changes"]
       });
     });
+
+    var labelFor = function (id) {
+      if (labels[id]) return labels[id];
+      return templates[id] ? templates[id].label : id;
+    };
+
+    if (payload.restDays) {
+      var before = (state.restDays || []).slice().sort().join(",");
+      if (before !== payload.restDays.join(",")) {
+        var names = function (days) { return days.length ? days.map(function (d) { return WEEKDAY_LABELS[d]; }).join(", ") : "none"; };
+        changes.push({ type: "restDays", label: "Rest days", from: names((state.restDays || []).slice().sort()), to: names(payload.restDays) });
+      }
+    }
 
     Object.keys(payload.weekPlan || {}).forEach(function (dayKey) {
       var day = Number(dayKey);
@@ -1639,7 +1699,7 @@
       changes.push({
         type: "weekday", day: day, label: WEEKDAY_LABELS[day],
         from: templates[oldTemplateId] ? templates[oldTemplateId].label : oldTemplateId,
-        to: templates[newTemplateId] ? templates[newTemplateId].label : newTemplateId
+        to: labelFor(newTemplateId)
       });
     });
 
@@ -1647,16 +1707,20 @@
   }
 
   function applyPlanChanges(state, payload) {
+    var labels = payload.labels || {};
     var next = Object.assign({}, state);
     next.templates = Object.assign({}, state.templates);
     Object.keys(payload.templates || {}).forEach(function (templateId) {
-      var oldTemplate = next.templates[templateId] || {};
-      next.templates[templateId] = Object.assign({}, oldTemplate, { exercises: payload.templates[templateId] });
+      var oldTemplate = next.templates[templateId] || { id: templateId };
+      var patch = { exercises: payload.templates[templateId] };
+      if (labels[templateId]) patch.label = labels[templateId];
+      next.templates[templateId] = Object.assign({}, oldTemplate, patch);
     });
     next.weekPlan = Object.assign({}, state.weekPlan);
     Object.keys(payload.weekPlan || {}).forEach(function (dayKey) {
       next.weekPlan[Number(dayKey)] = payload.weekPlan[dayKey];
     });
+    if (payload.restDays) next.restDays = payload.restDays.slice();
     return next;
   }
 
@@ -1829,7 +1893,8 @@
     }, null, 2));
     lines.push("```");
     lines.push("");
-    lines.push("Only include a template if you're changing it -- give its FULL exercise list (existing ones you're not changing plus your edits), since importing replaces that template's whole list. metric is \"reps\" or \"seconds\"; loaded is true/false. weekPlan keys are weekday numbers (0=Sun..6=Sat); only existing template ids (" + getTemplateIds(state).join(", ") + ") are valid -- add a new workout template from Settings first if you want to propose one that doesn't exist yet. Omit the json block entirely if you have no concrete changes to propose.");
+    var cardioIds = getTemplateIds(state).filter(function (id) { return getTemplates(state)[id].isCardio; });
+    lines.push("Only include a template if you're changing it -- give its FULL exercise list (existing ones you're not changing plus your edits), since importing replaces that template's whole list. metric is \"reps\" or \"seconds\"; loaded is true/false; targetRepsMax (optional, weighted exercises only) is the top of the rep range before adding weight. Existing template ids: " + getTemplateIds(state).join(", ") + " (" + cardioIds.join(", ") + " is cardio and has no exercise list). A template may include \"label\" to rename it; to create a new template, use a new lowercase-dashed id and include a \"label\". weekPlan keys are weekday numbers (0=Sun..6=Sat). Optional \"restDays\" is the full list of rest weekdays (at least one). Omit the json block entirely if you have no concrete changes to propose.");
 
     return lines.join("\n");
   }
@@ -2600,8 +2665,10 @@
         '<div class="muted" style="margin-bottom:10px;">Recovery day. Garmin already has your steps/walks — log optional bike, jump rope, or other cardio here if you did any.</div>' +
         '<button class="btn ghost block" data-action="toggle-rest-cardio">' + (cardioLogged ? "Edit Cardio Log" : "+ Add Cardio") + '</button>' +
         '<div id="restCardioSlot" style="margin-top:10px;display:' + (cardioLogged ? "block" : "none") + ';"></div>' +
-        '<div style="margin-top:10px;"><button class="btn ghost sm" data-action="open-swap">Swap this day</button></div>' +
-        "</div>";
+        '<div style="margin-top:10px;"><button class="btn ghost sm" data-action="open-swap">Swap this day</button> ' +
+        '<button class="btn ghost sm" data-action="open-custom-exercise">+ Custom Exercise</button></div>' +
+        "</div>" +
+        renderCustomExerciseCards(vm, readinessVerdict);
       if (cardioLogged) renderCardioForm($("#restCardioSlot"), vm.todaySession.cardio);
       else $("#restCardioSlot").innerHTML = "";
       return;
@@ -2622,8 +2689,10 @@
         '<h2>' + esc(vm.template.label) + '<span class="tag">' + esc(dateTag) + '</span></h2>' +
         '<div class="muted" style="margin-bottom:10px;">Structured cardio. Pick a type and log duration/effort — runs & walks already come in through Garmin.</div>' +
         '<div id="cardioFormSlot"></div>' +
-        '<div style="margin-top:10px;"><button class="btn ghost sm" data-action="open-swap">Swap this day</button></div>' +
-        "</div>";
+        '<div style="margin-top:10px;"><button class="btn ghost sm" data-action="open-swap">Swap this day</button> ' +
+        '<button class="btn ghost sm" data-action="open-custom-exercise">+ Custom Exercise</button></div>' +
+        "</div>" +
+        renderCustomExerciseCards(vm, readinessVerdict);
       renderCardioForm($("#cardioFormSlot"), vm.todaySession && vm.todaySession.cardio);
       return;
     }
@@ -2641,16 +2710,19 @@
       "</div>";
 
     html += exVms.map(function (evm) { return renderExerciseCard(evm); }).join("");
+    html += renderCustomExerciseCards(vm, readinessVerdict);
 
+    el.innerHTML = html;
+  }
+
+  function renderCustomExerciseCards(vm, readinessVerdict) {
     var customEx = (vm.todaySession && vm.todaySession.exercises || []).filter(function (e) { return e.isCustom; });
-    html += customEx.map(function (e) {
+    return customEx.map(function (e) {
       var def = { name: e.name, metric: e.metric || "reps", loaded: e.loaded !== undefined ? e.loaded : true, targetSets: e.sets.length || 1, targetReps: 0 };
       var suggestion = L.suggestCustomProgression(state.exercises[e.name], readinessVerdict, state.ownedWeights, vm.isDeload);
       var evm = { def: def, sets: e.sets, suggestion: suggestion, complete: L.allSetsComplete(e.sets, e.sets.length) };
       return renderExerciseCard(evm, true);
     }).join("");
-
-    el.innerHTML = html;
   }
 
   function renderExerciseCard(evm, isCustom) {
@@ -2914,7 +2986,7 @@
 
     var exEntry = session.exercises.find(function (e) { return e.name === exerciseName; });
     if (!exEntry) {
-      var def = (vm.template.exercises || []).find(function (d) { return d.name === exerciseName; });
+      var def = ((!vm.isRest && vm.template && vm.template.exercises) || []).find(function (d) { return d.name === exerciseName; });
       exEntry = { name: exerciseName, isCustom: !def, metric: def ? def.metric : "reps", loaded: def ? def.loaded : true, sets: [] };
       session.exercises.push(exEntry);
     }
@@ -2943,7 +3015,11 @@
     var vm = L.buildTodayViewModel(state, new Date(session.date + "T00:00:00"));
     // Use what this session actually recorded as assigned, not today's live
     // template -- same reasoning as isDayCompliant.
-    var effectiveTemplate = session.templateSnapshot || vm.template;
+    // A rest day's vm.template is just whatever the weekPlan would assign if
+    // it weren't resting -- it isn't what the day is, so a custom exercise
+    // logged on a rest day must not pick up targets (or a workout-complete
+    // bonus) from it.
+    var effectiveTemplate = session.templateSnapshot || (vm.isRest ? null : vm.template);
     var def = effectiveTemplate && effectiveTemplate.exercises ? effectiveTemplate.exercises.find(function (d) { return d.name === exerciseName; }) : null;
     var exEntry = session.exercises.find(function (e) { return e.name === exerciseName; });
     var targetSets = def ? def.targetSets : exEntry.sets.length;
@@ -3742,7 +3818,7 @@
     }
 
     var diffHtml = diff.map(function (d) {
-      if (d.type === "weekday") {
+      if (d.type === "weekday" || d.type === "restDays") {
         return '<div class="plan-diff-block"><div class="diff-title">' + esc(d.label) + '</div>' +
           '<div class="diff-line">' + esc(d.from) + " → " + esc(d.to) + "</div></div>";
       }

@@ -889,6 +889,45 @@ function main() {
   const parsedWithState = L.parsePlanChangePayload(customTemplateText, customTemplateState);
   check("parsePlanChangePayload accepts a custom template id when given the real state", parsedWithState.valid === true && parsedWithState.payload.templates["arms-day"].length === 1);
 
+  /* ---- plan-change import: create / rename templates, rest days ---- */
+  const fullPlanText = "```json\n" + JSON.stringify({ planChanges: {
+    templates: {
+      lower: { label: "Legs & Core", exercises: [{ name: "Goblet Squat", metric: "reps", loaded: true, targetSets: 4, targetReps: 12, targetRepsMax: 20 }] },
+      explosive: { label: "Explosive Power", exercises: [{ name: "Burpee", metric: "reps", loaded: false, targetSets: 3, targetReps: 10, targetRepsMax: 15 }] }
+    },
+    weekPlan: { "2": "lower", "4": "explosive" },
+    restDays: [3, 0]
+  } }) + "\n```";
+  const planState = L.freshState();
+  const parsedFull = L.parsePlanChangePayload(fullPlanText, planState);
+  check("parsePlanChangePayload creates a new template when given a label", parsedFull.valid && parsedFull.payload.templates.explosive.length === 1 && parsedFull.payload.labels.explosive === "Explosive Power");
+  check("parsePlanChangePayload lets a weekday point at a template created in the same payload", parsedFull.payload.weekPlan[4] === "explosive");
+  check("parsePlanChangePayload normalizes restDays (sorted)", parsedFull.payload.restDays.join(",") === "0,3");
+  check("parsePlanChangePayload keeps targetRepsMax on a weighted exercise", parsedFull.payload.templates.lower[0].targetRepsMax === 20);
+  check("parsePlanChangePayload drops targetRepsMax on a bodyweight exercise", parsedFull.payload.templates.explosive[0].targetRepsMax === undefined);
+
+  const fullDiff = L.diffPlanChanges(planState, parsedFull.payload);
+  check("diffPlanChanges shows a rename line for a relabeled template", fullDiff.some((d) => d.templateId === "lower" && d.lines.some((l) => l.indexOf("Renamed:") === 0)));
+  check("diffPlanChanges titles a brand-new template as new", fullDiff.some((d) => d.templateId === "explosive" && d.isNew && d.label.indexOf("New template") === 0));
+  check("diffPlanChanges shows a rest-day change", fullDiff.some((d) => d.type === "restDays" && d.to === "Sun, Wed"));
+  check("diffPlanChanges labels a weekday pointing at a new template by its new label", fullDiff.some((d) => d.type === "weekday" && d.day === 4 && d.to === "Explosive Power"));
+
+  const appliedFull = L.applyPlanChanges(planState, parsedFull.payload);
+  check("applyPlanChanges creates the new template with its id and label", appliedFull.templates.explosive.id === "explosive" && appliedFull.templates.explosive.label === "Explosive Power");
+  check("applyPlanChanges renames an existing template", appliedFull.templates.lower.label === "Legs & Core");
+  check("applyPlanChanges applies rest days", appliedFull.restDays.join(",") === "0,3");
+  check("applyPlanChanges does not mutate the source state", planState.restDays.join(",") === L.DEFAULT_REST_DAYS.join(",") && !planState.templates.explosive);
+
+  const badIdText = "```json\n" + JSON.stringify({ planChanges: { templates: { "Bad Id!": { label: "X", exercises: [{ name: "X", targetSets: 3, targetReps: 10 }] } } } }) + "\n```";
+  check("parsePlanChangePayload rejects a new template id that isn't lowercase-dashed", L.parsePlanChangePayload(badIdText, planState).valid === false);
+
+  const cardioEditText = "```json\n" + JSON.stringify({ planChanges: { templates: { cardio: { exercises: [{ name: "X", targetSets: 3, targetReps: 10 }] } } } }) + "\n```";
+  check("parsePlanChangePayload refuses to give the cardio template an exercise list", L.parsePlanChangePayload(cardioEditText, planState).valid === false);
+
+  const noRestText = "```json\n" + JSON.stringify({ planChanges: { restDays: [] } }) + "\n```";
+  const parsedNoRest = L.parsePlanChangePayload(noRestText, planState);
+  check("parsePlanChangePayload rejects an empty restDays list", parsedNoRest.valid === false && parsedNoRest.errors.some((e) => e.indexOf("restDays") === 0));
+
   /* ---- plan-change import: diff + apply ---- */
   const diffState = L.freshState();
   const diffPayload = {
