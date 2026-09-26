@@ -1109,6 +1109,14 @@ async function main() {
   check("every preset assigns all seven weekdays", L.STARTER_PLANS.every((p) => [0, 1, 2, 3, 4, 5, 6].every((d) => p.planChanges.weekPlan[String(d)])));
   check("every preset's rest days are valid", L.STARTER_PLANS.every((p) => L.validateRestDays(p.planChanges.restDays).valid));
   check("every preset has a core exercise in every strength workout", L.STARTER_PLANS.every((p) => Object.values(p.planChanges.templates).every((t) => t.exercises.some((e) => (L.DEFAULT_EXERCISE_BANK.find((b) => b.name === e.name) || {}).category === "Core"))));
+  // Pushing far more than pulling (or vice versa) week over week is a
+  // classic source of shoulder trouble -- keep every preset within 1.5:1.
+  const weeklySets = (p, category) => [0, 1, 2, 3, 4, 5, 6].reduce((sum, d) => {
+    const t = p.planChanges.restDays.indexOf(d) === -1 && p.planChanges.templates[p.planChanges.weekPlan[String(d)]];
+    return sum + (t ? t.exercises.filter((e) => (L.DEFAULT_EXERCISE_BANK.find((b) => b.name === e.name) || {}).category === category).reduce((n, e) => n + e.targetSets, 0) : 0);
+  }, 0);
+  const unbalanced = L.STARTER_PLANS.filter((p) => { const push = weeklySets(p, "Push"), pull = weeklySets(p, "Pull"); return Math.max(push, pull) > 1.5 * Math.min(push, pull); }).map((p) => p.id);
+  check("every preset keeps weekly push:pull sets within 1.5:1 (" + (unbalanced.join(", ") || "all balanced") + ")", unbalanced.length === 0);
   check("every preset parses and applies cleanly on a fresh install", L.STARTER_PLANS.every((p) => {
     const fresh = L.freshState();
     const r = L.parsePlanChangePayload(JSON.stringify({ planChanges: p.planChanges }), fresh);
