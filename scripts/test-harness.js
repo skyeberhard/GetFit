@@ -1163,7 +1163,7 @@ async function main() {
   const top = (answers) => L.recommendPresets(answers)[0].preset.id;
   check("new, 3 days, 30 min, general fitness -> Foundations", top({ goal: "fitness", days: 3, minutes: 30, equipment: ["dumbbells"], experience: "new" }) === "foundations");
   check("regular, 4 days, 45 min, build muscle -> Upper / Lower", top({ goal: "muscle", days: 4, minutes: 45, equipment: ["dumbbells", "bar"], experience: "regular" }) === "upper-lower");
-  check("regular, 5 days, full equipment, build muscle -> Reacher Hybrid", top({ goal: "muscle", days: 5, minutes: 45, equipment: ["dumbbells", "bar", "rope", "bike"], experience: "regular" }) === "reacher-hybrid");
+  check("regular, 5 days, full equipment, build muscle -> Five-Day Hybrid", top({ goal: "muscle", days: 5, minutes: 45, equipment: ["dumbbells", "bar", "rope", "bike"], experience: "regular" }) === "five-day-hybrid");
   check("no equipment -> Bodyweight Only", top({ goal: "fitness", days: 4, minutes: 30, equipment: [], experience: "returning" }) === "bodyweight");
   check("20 minutes -> 20-Minute Express", top({ goal: "fatloss", days: 3, minutes: 20, equipment: ["dumbbells"], experience: "returning" }) === "express");
   check("a health consideration -> Low-Impact first", top({ goal: "muscle", days: 5, minutes: 45, equipment: ["dumbbells", "bar"], experience: "regular", health: ["injury"] }) === "low-impact");
@@ -1189,6 +1189,30 @@ async function main() {
   check("removals are shown in the preview", L.diffPlanChanges(introState, parsedRemoval.payload).some((d) => d.isRemoval && d.templateId === "upperA"));
   const stillUsed = L.parsePlanChangePayload(JSON.stringify({ planChanges: { removeTemplates: ["upperA"] } }), L.freshState());
   check("plan import won't remove a workout still assigned to a weekday", stillUsed.valid === false && stillUsed.errors[0].indexOf("still assigned") !== -1);
+
+  /* ---- attribute radar: Core, Balance, Recovery + as-of snapshots ---- */
+  const radarNow = new Date("2026-09-26T12:00:00");
+  const day = (n) => L.toDateKey(L.addDays(radarNow, -n));
+  const setOf = (name, n) => ({ name, sets: Array.from({ length: n }, () => ({ reps: 10, weight: 20 })) });
+  const radarState = L.freshState();
+  radarState.sessions = [
+    { id: 1, date: day(1), exercises: [setOf("Push-Up", 4), setOf("Plank", 3)] },
+    { id: 2, date: day(3), exercises: [setOf("Goblet Squat", 4), setOf("Dead Bug", 3)] },
+    { id: 3, date: day(5), exercises: [setOf("Dumbbell Row", 2), setOf("Push-Up", 4)] },
+    { id: 4, date: day(40), exercises: [setOf("Goblet Squat", 4), setOf("Plank", 3)] }
+  ];
+  radarState.readiness = { [day(1)]: { verdict: "PUSH" }, [day(2)]: { verdict: "HOLD" }, [day(20)]: { verdict: "RECOVERY" } };
+  const radar = L.computeAttributes(radarState, radarNow);
+  check("attributes cover all six radar spokes", L.ATTRIBUTE_ORDER.length === 6 && L.ATTRIBUTE_ORDER.every((k) => radar[k] && typeof radar[k].score === "number"));
+  check("Core counts days with ab work in the last 30 (2 of a 5-a-week goal)", radar.core.score === Math.round(2 / (30 * 5 / 7) * 99) && radar.core.detail.indexOf("2 days") === 0);
+  check("Balance compares the lightest of push/pull/legs to the heaviest (pull 2 vs push 8)", radar.balance.score === Math.round(99 * 2 / 8) && radar.balance.detail.indexOf("Pull is lightest") !== -1);
+  check("Recovery averages check-ins from the last 14 days only (PUSH 99, HOLD 40)", radar.recovery.score === Math.round((99 + 40) / 2));
+  const thin = L.freshState(); thin.sessions = [{ id: 1, date: day(1), exercises: [setOf("Push-Up", 3)] }];
+  check("Balance waits for enough history before scoring", L.computeAttributes(thin, radarNow).balance.score === 0);
+  const asOf = L.stateAsOf(radarState, L.addDays(radarNow, -30));
+  check("stateAsOf drops sessions and check-ins after the date", asOf.sessions.length === 1 && Object.keys(asOf.readiness).length === 0);
+  check("stateAsOf doesn't mutate the account", radarState.sessions.length === 4);
+  check("30-days-ago attributes only see what had happened by then", L.computeAttributes(asOf, L.addDays(radarNow, -30)).core.detail.indexOf("1 day") === 0);
 
   /* ---- daysBetween (backup reminder) ---- */
   check("daysBetween is null for no timestamp", L.daysBetween(null, new Date("2026-09-25T00:00:00.000Z")) === null);

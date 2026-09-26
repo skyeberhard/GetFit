@@ -326,15 +326,34 @@
   .fselect-list .suggestion-item{background:var(--s3);border:1px solid var(--border-strong);border-top:none;}
   .fselect-list .suggestion-item:first-child{border-top:1px solid var(--border-strong);}
 
-  /* attribute bars */
-  .attr-row{margin-bottom:12px;}
-  .attr-row:last-child{margin-bottom:0;}
-  .attr-head{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;margin-bottom:5px;}
-  .attr-head .name{font-weight:600;}
-  .attr-head .score{font-family:var(--display);font-size:16px;font-weight:800;color:var(--text);font-variant-numeric:tabular-nums;}
-  .attr-bar{height:6px;border-radius:3px;background:var(--b1);overflow:hidden;}
-  .attr-bar-fill{height:100%;background:var(--accent);border-radius:3px;}
-  .attr-detail{font-size:11px;color:var(--text-faint);margin-top:4px;}
+  /* attribute radar (see renderAttributeRadar) */
+  .radar-wrap{margin:0;}
+  .radar-svg{display:block;width:100%;max-width:400px;height:auto;margin:0 auto;}
+  .radar-ring{fill:none;stroke:var(--b1);stroke-width:1;}
+  .radar-ring.outer{stroke:var(--b2);}
+  .radar-spoke{stroke:var(--b1);stroke-width:1;}
+  .radar-past{fill:none;stroke:var(--text-faint);stroke-width:1.5;stroke-dasharray:4 4;stroke-linejoin:round;}
+  .radar-area{fill:color-mix(in srgb,var(--accent) 20%,transparent);stroke:var(--accent);stroke-width:2;stroke-linejoin:round;
+    filter:drop-shadow(0 0 8px color-mix(in srgb,var(--accent) 40%,transparent));}
+  .radar-dot{fill:var(--accent);stroke:var(--s2);stroke-width:1.5;}
+  .radar-hit{fill:transparent;}
+  .radar-ring,.radar-spoke,.radar-past,.radar-area{pointer-events:none;}
+  .radar-axis{cursor:pointer;}
+  .radar-label{font-family:var(--font);font-size:9.5px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;fill:var(--text-dim);}
+  .radar-score{font-family:var(--display);font-size:17px;font-weight:800;fill:var(--text);font-variant-numeric:tabular-nums;}
+  .radar-axis.sel .radar-label,.radar-axis.sel .radar-score{fill:var(--accent);}
+  .radar-legend{display:flex;justify-content:center;gap:18px;font-size:11px;color:var(--text-dim);margin:2px 0 10px;}
+  .radar-legend span{display:flex;align-items:center;gap:6px;}
+  .radar-legend i{display:inline-block;width:16px;height:0;border-top:2px solid var(--accent);}
+  .radar-legend i.then{border-top:1.5px dashed var(--text-faint);}
+  .attr-focus{border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--s1);padding:12px 14px;}
+  .attr-focus-name{font-family:var(--display);font-weight:700;font-size:17px;}
+  .attr-focus-score{color:var(--accent);font-weight:800;margin-left:4px;font-variant-numeric:tabular-nums;}
+  .attr-detail{font-size:12px;color:var(--text-dim);margin-top:6px;line-height:1.45;}
+  .delta{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 9px;border-radius:10px;flex-shrink:0;}
+  .delta.up{color:var(--green);background:var(--done-soft);}
+  .delta.down{color:var(--red);background:var(--red-soft);}
+  .delta.flat{color:var(--text-dim);background:var(--neutral-soft);}
 
   .level-block{display:flex;align-items:center;gap:14px;margin-bottom:16px;}
   .level-badge{width:56px;height:56px;border-radius:50%;background:var(--accent-soft);border:1px solid var(--accent-soft-border);display:flex;align-items:center;justify-content:center;flex-direction:column;flex:0 0 auto;}
@@ -1323,11 +1342,73 @@
 
     var consistencyScore = computeConsistency(state, now, 30);
 
+    // Core, Balance and Recovery read logged sets / check-ins by category.
+    var categoryOf = function (name) {
+      var entry = (state.exerciseBank || {})[name] || BUILTIN_BANK_BY_NAME[name];
+      return entry ? entry.category : null;
+    };
+    var coreDays = {}, setsBy = { Push: 0, Pull: 0, Legs: 0 };
+    (state.sessions || []).forEach(function (s) {
+      if (s.date < since) return;
+      (s.exercises || []).forEach(function (ex) {
+        var filled = (ex.sets || []).filter(isSetFilled).length;
+        if (!filled) return;
+        var c = categoryOf(ex.name);
+        if (c === "Core") coreDays[s.date] = true;
+        if (setsBy[c] !== undefined) setsBy[c] += filled;
+      });
+    });
+
+    // Core: days with any ab work vs a goal of 5 days a week.
+    var coreDayCount = Object.keys(coreDays).length;
+    var coreScore = Math.min(99, Math.round(coreDayCount / (30 * 5 / 7) * 99));
+
+    // Balance: the least-trained of push / pull / legs against the most --
+    // 99 = even, low = one pattern is being neglected. Needs a little
+    // history before it means anything.
+    var patternTotal = setsBy.Push + setsBy.Pull + setsBy.Legs;
+    var balanceScore = 0, balanceDetail = "not enough training logged yet — needs a dozen sets across push, pull and legs";
+    if (patternTotal >= 12) {
+      var patterns = ["Push", "Pull", "Legs"];
+      var most = Math.max(setsBy.Push, setsBy.Pull, setsBy.Legs);
+      var weakest = patterns.reduce(function (w, k) { return setsBy[k] < setsBy[w] ? k : w; }, "Push");
+      balanceScore = Math.round(99 * setsBy[weakest] / most);
+      balanceDetail = "Push " + setsBy.Push + " · Pull " + setsBy.Pull + " · Legs " + setsBy.Legs + " sets in 30 days" + (balanceScore < 99 ? " — " + weakest + " is lightest" : "");
+    }
+
+    // Recovery: recent readiness verdicts, averaged. Context, not a grade --
+    // a low score says "you've been run down", which is worth seeing.
+    var recoverySince = daysAgoKey(now, 14);
+    var verdictScore = { PUSH: 99, STEADY: 70, HOLD: 40, RECOVERY: 15 };
+    var checks = Object.keys(state.readiness || {}).filter(function (k) { return k >= recoverySince && state.readiness[k] && verdictScore[state.readiness[k].verdict] !== undefined; }).sort();
+    var recoveryScore = checks.length ? Math.round(checks.reduce(function (sum, k) { return sum + verdictScore[state.readiness[k].verdict]; }, 0) / checks.length) : 0;
+    var recoveryDetail = checks.length
+      ? "average of " + checks.length + " check-in" + (checks.length === 1 ? "" : "s") + " in the last 14 days (latest: " + state.readiness[checks[checks.length - 1]].verdict + ")"
+      : "no readiness check-ins in the last 14 days";
+
     return {
       strength: { label: "Strength", score: strengthScore, detail: strengthDetail },
       endurance: { label: "Endurance", score: enduranceScore, detail: enduranceDetail },
-      consistency: { label: "Consistency", score: consistencyScore, detail: consistencyScore + "% of scheduled days hit in the last 30 days" }
+      consistency: { label: "Consistency", score: consistencyScore, detail: consistencyScore + "% of scheduled days hit in the last 30 days" },
+      core: { label: "Core", score: coreScore, detail: coreDayCount + " day" + (coreDayCount === 1 ? "" : "s") + " with core work in the last 30 (goal: 5 a week)" },
+      balance: { label: "Balance", score: balanceScore, detail: balanceDetail },
+      recovery: { label: "Recovery", score: recoveryScore, detail: recoveryDetail }
     };
+  }
+
+  var ATTRIBUTE_ORDER = ["strength", "balance", "core", "consistency", "recovery", "endurance"];
+
+  // The account as it stood at the end of `date` -- sessions and check-ins
+  // after it removed -- so computeAttributes(stateAsOf(s, d), d) is an honest
+  // "what it looked like then", not "then's window plus everything since".
+  function stateAsOf(state, date) {
+    var key = toDateKey(date);
+    var readiness = {};
+    Object.keys(state.readiness || {}).forEach(function (k) { if (k <= key) readiness[k] = state.readiness[k]; });
+    return Object.assign({}, state, {
+      sessions: (state.sessions || []).filter(function (s) { return s.date <= key; }),
+      readiness: readiness
+    });
   }
 
   /* ---------- per-exercise history (for the progress trend view) ---------- */
@@ -1953,8 +2034,8 @@
        session length, lowImpact: no jumping, jointFriendly: built for
        people working around pain, injury or a health consideration. */
   var STARTER_PLANS = [{
-    id: "reacher-hybrid",
-    label: "Reacher Hybrid",
+    id: "five-day-hybrid",
+    label: "Five-Day Hybrid",
     description: "Upper push/pull, legs & core, explosive power, full-body dumbbell, a weekly run — rest Wed/Sun, core in every strength day.",
     days: 5, minutes: 45, level: "Intermediate", goals: ["muscle", "fitness"], lowImpact: false, jointFriendly: false,
     planChanges: {
@@ -2712,6 +2793,9 @@
     lines.push("- Strength: " + attrs.strength.score + "/99 — " + attrs.strength.detail);
     lines.push("- Endurance: " + attrs.endurance.score + "/99 — " + attrs.endurance.detail);
     lines.push("- Consistency: " + attrs.consistency.score + "% — " + attrs.consistency.detail);
+    lines.push("- Core: " + attrs.core.score + "/99 — " + attrs.core.detail);
+    lines.push("- Balance: " + attrs.balance.score + "/99 — " + attrs.balance.detail);
+    lines.push("- Recovery: " + attrs.recovery.score + "/99 — " + attrs.recovery.detail);
     lines.push("");
     lines.push("## Last 14 days");
     lines.push("- " + workoutCount + " strength sessions, " + cardioCount + " cardio sessions");
@@ -2792,6 +2876,8 @@
     DEFAULT_WEEK_PLAN: DEFAULT_WEEK_PLAN,
     CARDIO_TYPES: CARDIO_TYPES,
     getTemplateIds: getTemplateIds,
+    ATTRIBUTE_ORDER: ATTRIBUTE_ORDER,
+    stateAsOf: stateAsOf,
     EXERCISE_CATEGORIES: EXERCISE_CATEGORIES,
     DEFAULT_EXERCISE_BANK: DEFAULT_EXERCISE_BANK,
     STARTER_PLANS: STARTER_PLANS,
@@ -3726,19 +3812,79 @@
     $("#progStreakStatus").textContent = streak.todayCompliant ? "Today logged ✓" : "Log today to extend it";
     $("#progLongestStreak").textContent = "Longest: " + streak.longest + " days";
 
-    var attrs = L.computeAttributes(state, new Date());
-    var order = ["strength", "endurance", "consistency"];
-    $("#attrList").innerHTML = order.map(function (key) {
-      var a = attrs[key];
-      var pct = key === "consistency" ? a.score : Math.round((a.score / 99) * 100);
-      return '<div class="attr-row">' +
-        '<div class="attr-head"><span class="name">' + a.label + '</span><span class="score">' + a.score + (key === "consistency" ? "%" : "/99") + '</span></div>' +
-        '<div class="attr-bar"><div class="attr-bar-fill" style="width:' + pct + '%"></div></div>' +
-        '<div class="attr-detail">' + esc(a.detail) + '</div></div>';
-    }).join("");
-
+    renderAttributeRadar();
     renderExerciseList();
     renderSessionLog();
+  }
+
+  /* ---------- attribute radar ----------
+     Six spokes, each 0-99 (Consistency is a percent, same scale). The
+     filled shape is now; the dashed outline is the same six scores as the
+     account stood 30 days ago (stateAsOf), shown only once there's
+     history that old -- so growth reads at a glance. Tapping a spoke picks
+     it; with nothing picked, the card below shows the weakest spoke. */
+  var selectedAttr = null;
+
+  function renderAttributeRadar() {
+    var el = $("#attrList");
+    if (!el) return;
+    var now = new Date();
+    var attrs = L.computeAttributes(state, now);
+    var keys = L.ATTRIBUTE_ORDER;
+    var past = null;
+    var pastDate = L.addDays(now, -30);
+    var pastKey = L.toDateKey(pastDate);
+    if (state.sessions.some(function (s) { return s.date <= pastKey; })) {
+      past = L.computeAttributes(L.stateAsOf(state, pastDate), pastDate);
+    }
+    var weakest = keys.reduce(function (w, k) { return attrs[k].score < attrs[w].score ? k : w; }, keys[0]);
+    var focusKey = selectedAttr || weakest;
+
+    var cx = 190, cy = 150, R = 96;
+    var pt = function (i, frac) {
+      var angle = -Math.PI / 2 + i * 2 * Math.PI / keys.length;
+      return [cx + Math.cos(angle) * R * frac, cy + Math.sin(angle) * R * frac];
+    };
+    var ring = function (frac) { return keys.map(function (k, i) { return pt(i, frac).join(","); }).join(" "); };
+    var shape = function (set) { return keys.map(function (k, i) { return pt(i, Math.max(0.02, Math.min(99, set[k].score) / 99)).join(","); }).join(" "); };
+
+    var svg = '<svg class="radar-svg" viewBox="0 0 380 300" role="img" aria-label="Training profile: ' +
+      keys.map(function (k) { return attrs[k].label + " " + attrs[k].score; }).join(", ") + '">' +
+      [0.25, 0.5, 0.75, 1].map(function (f) { return '<polygon class="radar-ring' + (f === 1 ? " outer" : "") + '" points="' + ring(f) + '"/>'; }).join("") +
+      keys.map(function (k, i) { var p = pt(i, 1); return '<line class="radar-spoke" x1="' + cx + '" y1="' + cy + '" x2="' + p[0] + '" y2="' + p[1] + '"/>'; }).join("") +
+      (past ? '<polygon class="radar-past" points="' + shape(past) + '"/>' : "") +
+      '<polygon class="radar-area" points="' + shape(attrs) + '"/>' +
+      keys.map(function (k, i) {
+        var dot = pt(i, Math.max(0.02, attrs[k].score / 99));
+        var lab = pt(i, 1.27);
+        var anchor = Math.abs(lab[0] - cx) < 8 ? "middle" : (lab[0] > cx ? "start" : "end");
+        var sel = k === focusKey;
+        return '<g class="radar-axis' + (sel ? " sel" : "") + '" data-action="select-attr" data-attr="' + k + '">' +
+          '<circle class="radar-hit" cx="' + lab[0] + '" cy="' + (lab[1] - 4) + '" r="26"/>' +
+          '<circle class="radar-dot" cx="' + dot[0] + '" cy="' + dot[1] + '" r="' + (sel ? 5 : 3.5) + '"/>' +
+          '<text class="radar-label" x="' + lab[0] + '" y="' + (lab[1] - 8) + '" text-anchor="' + anchor + '">' + esc(attrs[k].label) + "</text>" +
+          '<text class="radar-score" x="' + lab[0] + '" y="' + (lab[1] + 10) + '" text-anchor="' + anchor + '">' + attrs[k].score + "</text></g>";
+      }).join("") +
+      "</svg>";
+
+    var a = attrs[focusKey];
+    var delta = past ? a.score - past[focusKey].score : null;
+    var deltaChip = delta === null ? "" :
+      '<span class="delta ' + (delta > 0 ? "up" : (delta < 0 ? "down" : "flat")) + '">' + (delta > 0 ? "+" + delta : (delta < 0 ? String(delta) : "no change")) + " vs 30 days ago</span>";
+    el.innerHTML =
+      '<div class="radar-wrap">' + svg + "</div>" +
+      (past ? '<div class="radar-legend"><span><i class="now"></i>Now</span><span><i class="then"></i>30 days ago</span></div>' : "") +
+      '<div class="attr-focus">' +
+      '<div class="eyebrow">' + (selectedAttr ? "Selected" : "Focus area") + "</div>" +
+      '<div class="row" style="margin-top:4px;"><span class="attr-focus-name">' + esc(a.label) + ' <span class="attr-focus-score">' + a.score + "</span></span>" + deltaChip + "</div>" +
+      '<div class="attr-detail">' + esc(a.detail) + "</div>" +
+      '<div class="faint" style="font-size:11px;margin-top:8px;">Tap a spoke for details.</div>' +
+      "</div>";
+  }
+
+  function selectAttr(key) {
+    selectedAttr = selectedAttr === key ? null : key;
+    renderAttributeRadar();
   }
 
   // The reps-axis display unit for an exercise -- "sec" for a timed hold
@@ -3878,6 +4024,7 @@
       case "picker-pick": return pickFromBank(el.dataset.exercise);
       case "picker-create": return openBankForm("new", pickerFilter.query.trim(), true);
       case "open-find-plan": return startOnboarding("again");
+      case "select-attr": return selectAttr(el.dataset.attr);
       case "onb-next": onb.step += 1; return renderOnbStep();
       case "onb-back": onb.step -= 1; return renderOnbStep();
       case "onb-back-to-plans": onbPlanPending = false; onb.step = 4; return renderOnbStep();
