@@ -70,7 +70,7 @@ function loadTrainLogic(html) {
   return moduleObj.exports;
 }
 
-function main() {
+async function main() {
   const html = fs.readFileSync(APP_PATH, "utf8");
   const scripts = extractScripts(html);
   check("found inline script blocks", scripts.length >= 3);
@@ -1054,6 +1054,53 @@ function main() {
   check("applying a plan adds its exercises back into the bank", !!appliedStarter.exerciseBank["Jump Rope"] && appliedStarter.exerciseBank["Jump Rope"].category === "Conditioning");
   check("applying the starter plan sets Wed/Sun rest days", appliedStarter.restDays.join(",") === "0,3");
 
+  /* ---- share links ---- */
+  const sharer = L.applyPlanChanges(L.freshState(), L.parsePlanChangePayload(JSON.stringify({ planChanges: L.STARTER_PLANS[0].planChanges }), L.freshState()).payload);
+  const sharerBank = L.upsertBankEntry(sharer.exerciseBank, { name: "Wall Sit", category: "Legs", metric: "seconds", loaded: false, targetSets: 3, targetReps: 45 });
+  sharer.exerciseBank = sharerBank.bank;
+  sharer.templates.lower = L.addExerciseToTemplate(sharer.templates.lower, L.bankEntryToTemplateDef(sharerBank.entry));
+  sharer.templates.empty = { id: "empty", label: "Empty One", exercises: [] };
+  sharer.weekPlan[6] = "empty";
+  const sharePayload = L.buildSharePlanPayload(sharer);
+  check("share payload never includes history or other personal data", !("sessions" in sharePayload.planChanges) && !("readiness" in sharePayload.planChanges) && !("exercises" in sharePayload.planChanges));
+  check("share payload skips cardio and empty workouts", !sharePayload.planChanges.templates.cardio && !sharePayload.planChanges.templates.empty);
+  check("share payload drops a weekday pointing at a skipped workout", !("6" in sharePayload.planChanges.weekPlan) && sharePayload.planChanges.weekPlan["0"] === "cardio");
+  check("share payload carries bank categories for custom exercises", sharePayload.planChanges.categories["Wall Sit"] === "Legs");
+
+  const token = await L.encodeSharePlan(sharePayload);
+  check("share token is compressed and URL-safe", /^1\.[A-Za-z0-9_-]+$/.test(token));
+  check("share token stays small enough for a text message", token.length < 3000);
+  const url = L.buildShareUrl("https://example.github.io/GetFit/index.html#old", token);
+  check("buildShareUrl replaces any existing fragment", url === "https://example.github.io/GetFit/index.html#plan=" + token);
+  check("extractShareToken finds the token inside a whole pasted message", L.extractShareToken("hey try this " + url + " !!") === token);
+  const decoded = await L.decodeSharePlan(token);
+  check("share link round-trips losslessly", JSON.stringify(decoded) === JSON.stringify(sharePayload));
+
+  const receiver = L.freshState();
+  const receivedParse = L.parsePlanChangePayload(JSON.stringify(decoded), receiver);
+  check("a received plan parses with no warnings", receivedParse.valid && receivedParse.errors.length === 0);
+  const received = L.applyPlanChanges(receiver, receivedParse.payload);
+  check("a received custom exercise lands in the bank with its category", received.exerciseBank["Wall Sit"] && received.exerciseBank["Wall Sit"].category === "Legs");
+  check("a received plan recreates the sender's workouts and week", received.templates.explosive.label === "Explosive Power" && received.weekPlan[4] === "explosive" && received.restDays.join(",") === "0,3");
+
+  let damagedError = null;
+  try { await L.decodeSharePlan(token.slice(0, 40)); } catch (e) { damagedError = e.message; }
+  check("a truncated link fails with a friendly message", damagedError === "That plan link is damaged or incomplete.");
+  let oversizeError = null;
+  try { await L.decodeSharePlan("1." + "A".repeat(30000)); } catch (e) { oversizeError = e.message; }
+  check("an oversized link is refused before decompressing", oversizeError === "That plan link is damaged or incomplete.");
+  const plainToken = "0." + Buffer.from(JSON.stringify({ planChanges: { restDays: [0] } })).toString("base64url");
+  check("an uncompressed (0.) token also decodes", (await L.decodeSharePlan(plainToken)).planChanges.restDays[0] === 0);
+
+  /* ---- untrusted plan input is clamped ---- */
+  const hostile = L.parsePlanChangePayload(JSON.stringify({ planChanges: { templates: { upperA: { label: "x".repeat(500), exercises: [
+    { name: "__proto__", targetSets: 3, targetReps: 10 },
+    { name: "Push-Up", targetSets: 9999, targetReps: 100000, targetRepsMax: 5000000 }
+  ] } } } }), L.freshState());
+  check("a reserved object-key name is refused as an exercise name", hostile.payload.templates.upperA.length === 1 && hostile.payload.templates.upperA[0].name === "Push-Up");
+  check("absurd sets/reps are clamped", hostile.payload.templates.upperA[0].targetSets === 20 && hostile.payload.templates.upperA[0].targetReps === 999);
+  check("an absurdly long label is truncated", hostile.payload.labels.upperA.length === 60);
+
   /* ---- daysBetween (backup reminder) ---- */
   check("daysBetween is null for no timestamp", L.daysBetween(null, new Date("2026-09-25T00:00:00.000Z")) === null);
   check("daysBetween is null for an unparseable timestamp", L.daysBetween("not a date", new Date("2026-09-25T00:00:00.000Z")) === null);
@@ -1065,4 +1112,4 @@ function main() {
   if (failures > 0) process.exit(1);
 }
 
-main();
+main().catch((err) => { console.error(err); process.exit(1); });

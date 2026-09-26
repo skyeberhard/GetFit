@@ -560,9 +560,12 @@
         <button class="btn block" data-action="import-data">Import JSON</button>
       </div>
       <div class="muted" id="lastBackupLine" style="margin-bottom:8px;"></div>
+      <div id="storageLine" style="margin-bottom:10px;"></div>
       <button class="btn ghost block" data-action="open-digest">Generate AI Check-In Digest</button>
       <div style="height:8px"></div>
       <button class="btn ghost block" data-action="open-plan-import">Import Plan Changes</button>
+      <div style="height:8px"></div>
+      <button class="btn ghost block" data-action="open-share-plan">Share My Plan</button>
       <input type="file" id="importFile" accept="application/json" style="display:none;">
     </div>
 
@@ -1829,6 +1832,92 @@
     }
   }];
 
+  /* ---------- share links ----------
+     A plan travels as ...index.html#plan=<token>. The token is the
+     plan-change JSON, deflate-compressed where the browser can ("1."
+     prefix; plain JSON is "0."), base64url-encoded. Opening it lands in
+     the same preview-then-Apply import step as a pasted plan, so a link
+     can never change anyone's plan -- or touch their history -- on its
+     own. Only workouts, the weekly plan, and rest days are shared. */
+  var MAX_SHARE_TOKEN = 20000; // a full plan is ~1-3KB; also bounds decompression
+
+  function buildSharePlanPayload(state) {
+    var templates = getTemplates(state);
+    var bank = state.exerciseBank || {};
+    var out = {}, categories = {};
+    getTemplateIds(state).forEach(function (id) {
+      var t = templates[id];
+      // Cardio has no exercise list, and an empty workout would only
+      // produce a "skipped" warning on the other end.
+      if (t.isCardio || !(t.exercises || []).length) return;
+      out[id] = { label: t.label, exercises: JSON.parse(JSON.stringify(t.exercises)) };
+      if (t.focus && t.focus.length) out[id].focus = t.focus.slice();
+      t.exercises.forEach(function (e) { if (bank[e.name] && bank[e.name].category) categories[e.name] = bank[e.name].category; });
+    });
+    var weekPlan = {};
+    Object.keys(state.weekPlan || {}).forEach(function (day) {
+      var id = state.weekPlan[day];
+      if (out[id] || (templates[id] && templates[id].isCardio)) weekPlan[day] = id;
+    });
+    return { planChanges: { templates: out, weekPlan: weekPlan, restDays: (state.restDays || []).slice(), categories: categories } };
+  }
+
+  function bytesToBase64Url(bytes) {
+    var bin = "";
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  function base64UrlToBytes(text) {
+    var b64 = text.replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    var bin = atob(b64);
+    var out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  function pipeBytes(bytes, transform) {
+    return new Response(new Blob([bytes]).stream().pipeThrough(transform)).arrayBuffer()
+      .then(function (buf) { return new Uint8Array(buf); });
+  }
+
+  function encodeSharePlan(payload) {
+    var bytes = new TextEncoder().encode(JSON.stringify(payload));
+    if (typeof CompressionStream === "undefined") return Promise.resolve("0." + bytesToBase64Url(bytes));
+    return pipeBytes(bytes, new CompressionStream("deflate-raw")).then(function (z) { return "1." + bytesToBase64Url(z); });
+  }
+
+  // Rejects (never throws synchronously) with a message fit to show as-is.
+  function decodeSharePlan(token) {
+    return Promise.resolve().then(function () {
+      var m = typeof token === "string" && token.length <= MAX_SHARE_TOKEN ? token.match(/^([01])\.([A-Za-z0-9_-]+)$/) : null;
+      if (!m) throw new Error("That plan link is damaged or incomplete.");
+      var bytes = base64UrlToBytes(m[2]);
+      if (m[1] === "0") return bytes;
+      if (typeof DecompressionStream === "undefined") throw new Error("This browser is too old to open plan links — update it, or ask for the plan as text instead.");
+      return pipeBytes(bytes, new DecompressionStream("deflate-raw"));
+    }).then(function (bytes) {
+      var parsed;
+      try { parsed = JSON.parse(new TextDecoder().decode(bytes)); } catch (e) { parsed = null; }
+      if (!parsed || typeof parsed !== "object") throw new Error("That plan link is damaged or incomplete.");
+      return parsed;
+    }, function (err) {
+      throw new Error(err && /browser|damaged/.test(err.message) ? err.message : "That plan link is damaged or incomplete.");
+    });
+  }
+
+  // Finds a share token in a full link, a bare #plan=... fragment, or a
+  // whole message someone pasted that contains the link.
+  function extractShareToken(text) {
+    var m = String(text || "").match(/[#&?]plan=([01]\.[A-Za-z0-9_-]+)/);
+    return m ? m[1] : null;
+  }
+
+  function buildShareUrl(baseUrl, token) {
+    return String(baseUrl).split("#")[0] + "#plan=" + token;
+  }
+
   /* ---------- plan-change import: parse / diff / apply a proposed patch ----
      Expected shape (fenced ```json``` or bare JSON, from an AI's digest
      response):
@@ -1856,18 +1945,31 @@
     }
   }
 
+  // Plans can arrive from other people (share links), so everything here
+  // is treated as untrusted: names/labels are length-capped, numbers are
+  // clamped to sane ranges, and names that would collide with object
+  // internals (exercise names are used as object keys) are refused.
+  var RESERVED_NAMES = ["__proto__", "constructor", "prototype"];
+  var MAX_NAME_LENGTH = 60;
+
+  function clampInt(value, min, max) {
+    return Math.min(max, Math.max(min, Math.round(Number(value)) || 0));
+  }
+
   function sanitizeExerciseDef(raw) {
     if (!raw || typeof raw.name !== "string" || !raw.name.trim()) return null;
+    var name = raw.name.trim().slice(0, MAX_NAME_LENGTH);
+    if (RESERVED_NAMES.indexOf(name) !== -1) return null;
     var def = {
-      name: raw.name.trim(),
+      name: name,
       metric: raw.metric === "seconds" ? "seconds" : "reps",
       loaded: raw.loaded !== false,
-      targetSets: Math.max(1, Math.round(Number(raw.targetSets)) || 0) || 1,
-      targetReps: Math.max(1, Math.round(Number(raw.targetReps)) || 0) || 1
+      targetSets: clampInt(raw.targetSets, 1, 20),
+      targetReps: clampInt(raw.targetReps, 1, 999)
     };
     // Only meaningful as the top of a weighted exercise's rep range (see
     // repRangeCeiling), and only if it's actually above the floor.
-    var max = Math.round(Number(raw.targetRepsMax));
+    var max = clampInt(raw.targetRepsMax, 0, 999);
     if (def.loaded && max > def.targetReps) def.targetRepsMax = max;
     return def;
   }
@@ -1895,13 +1997,14 @@
     var templates = {};
     var labels = {};
     var focus = {};
+    var categories = {};
     var weekPlan = {};
     var restDays = null;
 
     if (changes.templates && typeof changes.templates === "object") {
       Object.keys(changes.templates).forEach(function (templateId) {
         var entry = changes.templates[templateId] || {};
-        var label = typeof entry.label === "string" ? entry.label.trim() : "";
+        var label = typeof entry.label === "string" ? entry.label.trim().slice(0, MAX_NAME_LENGTH) : "";
         var isExisting = validIds.indexOf(templateId) !== -1;
         if (!isExisting) {
           if (!label) {
@@ -1928,6 +2031,17 @@
         templates[templateId] = cleaned;
         if (label) labels[templateId] = label;
         if (Array.isArray(entry.focus)) focus[templateId] = setTemplateFocus({}, entry.focus).focus;
+      });
+    }
+
+    // Optional: which bank category each exercise belongs to, so a shared
+    // custom exercise lands in the receiver's bank already categorized.
+    if (changes.categories && typeof changes.categories === "object") {
+      Object.keys(templates).forEach(function (id) {
+        templates[id].forEach(function (e) {
+          var c = changes.categories[e.name];
+          if (EXERCISE_CATEGORIES.indexOf(c) !== -1) categories[e.name] = c;
+        });
       });
     }
 
@@ -1967,7 +2081,7 @@
     return {
       valid: hasAnything,
       errors: errors,
-      payload: hasAnything ? { templates: templates, labels: labels, focus: focus, weekPlan: weekPlan, restDays: restDays } : null
+      payload: hasAnything ? { templates: templates, labels: labels, focus: focus, categories: categories, weekPlan: weekPlan, restDays: restDays } : null
     };
   }
 
@@ -2051,7 +2165,10 @@
       if (labels[templateId]) patch.label = labels[templateId];
       if ((payload.focus || {})[templateId]) patch.focus = payload.focus[templateId];
       next.templates[templateId] = Object.assign({}, oldTemplate, patch);
-      next.exerciseBank = addMissingToBank(next.exerciseBank || state.exerciseBank, payload.templates[templateId]);
+      var cats = payload.categories || {};
+      next.exerciseBank = addMissingToBank(next.exerciseBank || state.exerciseBank, payload.templates[templateId].map(function (e) {
+        return cats[e.name] ? Object.assign({}, e, { category: cats[e.name] }) : e;
+      }));
     });
     next.weekPlan = Object.assign({}, state.weekPlan);
     Object.keys(payload.weekPlan || {}).forEach(function (dayKey) {
@@ -2255,6 +2372,11 @@
     removeBankEntry: removeBankEntry,
     setTemplateFocus: setTemplateFocus,
     formatExerciseTarget: formatExerciseTarget,
+    buildSharePlanPayload: buildSharePlanPayload,
+    encodeSharePlan: encodeSharePlan,
+    decodeSharePlan: decodeSharePlan,
+    extractShareToken: extractShareToken,
+    buildShareUrl: buildShareUrl,
     addTemplate: addTemplate,
     removeTemplateFromMap: removeTemplateFromMap,
     templateWeekdaysInUse: templateWeekdaysInUse,
@@ -2618,7 +2740,11 @@
       syncLongestStreak();
       Store.save(state);
       render();
+      // Ask for protected storage once there's real data worth keeping.
+      checkStorage(state.sessions.length > 0);
+      openSharedPlanFromUrl();
     });
+    window.addEventListener("hashchange", openSharedPlanFromUrl);
     wireGlobalEvents();
     registerServiceWorker();
     // Best chance to catch state that would otherwise wait out the
@@ -3311,6 +3437,10 @@
       case "picker-pick": return pickFromBank(el.dataset.exercise);
       case "picker-create": return openBankForm("new", pickerFilter.query.trim(), true);
       case "load-starter-plan": return loadStarterPlan(el.dataset.plan);
+      case "open-share-plan": return openSharePlanModal();
+      case "share-plan-native": return sharePlanNative();
+      case "copy-share-link": return copyShareLink();
+      case "protect-storage": return checkStorage(true);
       case "set-theme": return setAppearance({ theme: el.dataset.value || null });
       case "set-contrast": return setAppearance({ contrast: el.dataset.value || null });
       case "open-plan-import": return openPlanImportModal();
@@ -3866,6 +3996,7 @@
     renderBackupInfoLine();
     renderAutoBackupPanel();
     renderAppearancePanel();
+    renderStorageLine();
   }
 
   /* ---------- appearance (Span themes; see the <head> script) ---------- */
@@ -4393,7 +4524,7 @@
     var body =
       '<div class="modal-grip"></div>' +
       '<div class="modal-head"><h2>Import Plan Changes</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
-      '<div class="muted" style="margin-bottom:10px;">Paste an AI’s response — the whole thing is fine, the JSON block gets found automatically. Nothing changes until you review the diff and confirm.</div>' +
+      '<div class="muted" style="margin-bottom:10px;">Paste a plan link someone shared, or an AI’s response — the whole message is fine, the plan gets found automatically. Nothing changes until you review the diff and confirm.</div>' +
       '<textarea class="plan-import" id="planImportText" placeholder="Paste the AI’s response here…"></textarea>' +
       '<div style="height:10px"></div>' +
       '<button class="btn primary block" data-action="preview-plan-changes">Preview Changes</button>' +
@@ -4403,6 +4534,126 @@
       }).join("") +
       '<div id="planImportPreview" style="margin-top:12px;"></div>';
     openModal(body);
+  }
+
+  /* ---------- share links (see TrainLogic's share-link section) ---------- */
+  var currentShareUrl = null;
+
+  function openSharePlanModal() {
+    currentShareUrl = null;
+    openModal(
+      '<div class="modal-grip"></div>' +
+      '<div class="modal-head"><h2>Share My Plan</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
+      '<div id="shareBody"><div class="muted">Building link…</div></div>');
+    // A file:// link points at a file on this phone -- useless to anyone else.
+    if (location.protocol === "file:") {
+      $("#shareBody").innerHTML = '<div class="banner">Sharing needs the app opened from its web address (the GitHub Pages link), not as a file on this device — a link to a local file won’t open for anyone else.</div>';
+      return;
+    }
+    var payload = L.buildSharePlanPayload(state);
+    var count = Object.keys(payload.planChanges.templates).length;
+    L.encodeSharePlan(payload).then(function (token) {
+      currentShareUrl = L.buildShareUrl(location.href, token);
+      var canShare = typeof navigator.share === "function";
+      $("#shareBody").innerHTML =
+        '<div class="muted" style="margin-bottom:10px;">Includes your ' + count + " workout" + (count === 1 ? "" : "s") + ", weekly plan and rest days — never your logged history. Whoever opens it sees a preview and decides whether to apply it.</div>" +
+        '<textarea id="shareLinkText" readonly style="min-height:84px;font-size:12px;word-break:break-all;">' + esc(currentShareUrl) + "</textarea>" +
+        '<div style="height:10px"></div>' +
+        (canShare ? '<button class="btn primary block" data-action="share-plan-native">Share…</button><div style="height:8px"></div>' : "") +
+        '<button class="btn block' + (canShare ? "" : " primary") + '" data-action="copy-share-link">Copy Link</button>' +
+        '<div id="shareStatus" class="muted" style="margin-top:8px;text-align:center;"></div>';
+    }).catch(function () {
+      $("#shareBody").innerHTML = '<div class="banner danger">Couldn’t build a link in this browser.</div>';
+    });
+  }
+
+  function sharePlanNative() {
+    if (!currentShareUrl) return;
+    navigator.share({ title: "TRAIN workout plan", text: "My TRAIN workout plan — open it to preview and apply:", url: currentShareUrl })
+      .catch(function () { /* closed the share sheet */ });
+  }
+
+  function copyShareLink() {
+    if (!currentShareUrl) return;
+    var status = $("#shareStatus");
+    var fallback = function () {
+      var ta = $("#shareLinkText");
+      ta.focus(); ta.select();
+      status.textContent = "Selected — copy it from the box above.";
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(currentShareUrl).then(function () { status.textContent = "Copied."; }, fallback);
+    } else fallback();
+  }
+
+  // Decodes a shared plan into the import box and previews it. Nothing
+  // applies until Apply is tapped, same as any other import.
+  function loadShareTokenIntoImport(token) {
+    var preview = $("#planImportPreview");
+    preview.innerHTML = '<div class="muted">Opening shared plan…</div>';
+    L.decodeSharePlan(token).then(function (payload) {
+      $("#planImportText").value = JSON.stringify(payload, null, 2);
+      previewPlanChanges();
+      preview.insertAdjacentHTML("afterbegin", '<div class="banner">Shared plan — review what would change, then Apply. Your logged workouts are never touched.</div>');
+    }).catch(function (err) {
+      preview.innerHTML = '<div class="banner danger">' + esc(err.message) + "</div>";
+    });
+  }
+
+  // A link opened into the app (#plan=... in the address).
+  function openSharedPlanFromUrl() {
+    var token = L.extractShareToken(location.hash);
+    if (!token || !state) return;
+    // Drop it from the address bar so a reload doesn't reopen it.
+    try { history.replaceState(null, "", location.pathname + location.search); } catch (e) { /* best-effort */ }
+    switchView("settings");
+    openPlanImportModal();
+    loadShareTokenIntoImport(token);
+  }
+
+  /* ---------- storage protection ----------
+     Browsers treat a site's data as "best-effort" by default: under disk
+     pressure they may clear it, installed or not. navigator.storage.persist()
+     asks to be exempt -- Chrome decides silently (installed apps and
+     regularly used sites usually get it), Firefox asks the user. Backups
+     remain the real safety net either way. */
+  var storageStatus = { supported: !!(navigator.storage && navigator.storage.persisted), persisted: null, asked: false, usage: null };
+
+  function checkStorage(requestIfNeeded) {
+    if (!storageStatus.supported) { renderStorageLine(); return; }
+    navigator.storage.persisted().then(function (persisted) {
+      if (persisted || !requestIfNeeded) return persisted;
+      storageStatus.asked = true;
+      return navigator.storage.persist();
+    }).then(function (persisted) {
+      storageStatus.persisted = !!persisted;
+      return navigator.storage.estimate ? navigator.storage.estimate() : null;
+    }).then(function (estimate) {
+      if (estimate && typeof estimate.usage === "number") storageStatus.usage = estimate.usage;
+      renderStorageLine();
+    }).catch(function () { renderStorageLine(); });
+  }
+
+  function isIosBrowserTab() {
+    var ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
+    var standalone = navigator.standalone || (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
+    return ios && !standalone;
+  }
+
+  function renderStorageLine() {
+    var el = $("#storageLine");
+    if (!el) return;
+    var usage = storageStatus.usage != null ? " Using " + Math.max(1, Math.round(storageStatus.usage / 1024)) + " KB." : "";
+    var iosNote = isIosBrowserTab() ? '<div class="banner" style="margin-top:8px;">On iPhone, add TRAIN to your Home Screen (Share → Add to Home Screen) — Safari clears data for websites you haven’t opened in 7 days, but not for Home Screen apps.</div>' : "";
+    if (!storageStatus.supported) {
+      el.innerHTML = '<div class="muted">Storage protection isn’t available in this browser — keep your backups current.</div>' + iosNote;
+    } else if (storageStatus.persisted) {
+      el.innerHTML = '<div class="muted">Storage: <strong style="color:var(--green);">protected</strong> — the browser won’t clear TRAIN’s data to free up space.' + usage + "</div>" + iosNote;
+    } else {
+      el.innerHTML = '<div class="muted">Storage: <strong style="color:var(--accent);">not protected</strong> — if the phone runs low on space, the browser may clear TRAIN’s data.' + usage + "</div>" +
+        (storageStatus.asked ? '<div class="faint" style="font-size:12px;margin-top:4px;">The browser declined for now. Installing TRAIN to your home screen and using it regularly usually changes that — until then, backups are your safety net.</div>' : "") +
+        '<button class="btn ghost sm" style="margin-top:8px;" data-action="protect-storage">Protect Storage</button>' + iosNote;
+    }
   }
 
   // Fills the paste box with a built-in plan and previews it -- same
@@ -4416,6 +4667,8 @@
 
   function previewPlanChanges() {
     var text = $("#planImportText").value;
+    var shareToken = L.extractShareToken(text);
+    if (shareToken) return loadShareTokenIntoImport(shareToken);
     var result = L.parsePlanChangePayload(text, state);
     var preview = $("#planImportPreview");
     pendingPlanChangePayload = null;

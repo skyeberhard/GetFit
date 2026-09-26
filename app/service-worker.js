@@ -32,7 +32,7 @@
    ============================================================ */
 "use strict";
 
-var CACHE_NAME = "train-cache-v6";
+var CACHE_NAME = "train-cache-v7";
 var APP_SHELL = [
   "./",
   "./index.html",

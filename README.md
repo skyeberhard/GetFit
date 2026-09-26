@@ -34,6 +34,15 @@ See `docs/overview.md` for the fuller feature/architecture history and `docs/roa
 
 **Installable as an app:** browsers only allow "Add to Home Screen"/"Install" with real offline caching when a service worker is registered, and service workers require https (or `localhost`) — never `file://`. So installability needs `app/` served from a real origin, e.g. GitHub Pages pointed at this repo's `app/` folder. Opened that way, it installs like any other PWA (home-screen icon, standalone window, offline caching via `service-worker.js`).
 
+## Releases (once others are using it)
+
+Everyone who installs the app runs whatever is deployed from **`main`**. Each person's plans and history live only on their own device — a release can change the app, never anyone's data or plan.
+
+- Work happens on other branches; `.github/workflows/test.yml` runs the test harness on every push and pull request.
+- Merging (or pushing) to `main` is the release: `.github/workflows/deploy-pages.yml` runs the harness again and deploys only if it passes. The schema-migration tests matter most here — a release that upgraded saved data wrong would damage every user's history.
+- Bump `CACHE_NAME` in `app/service-worker.js` with each release so installed apps pick it up (and show the in-app "Update available" banner).
+- Plans reach people without touching their data: a built-in starter plan (ships to everyone, appears in Import Plan Changes) or a share link (Settings → Data → Share My Plan) sent to specific people. Either way, nothing applies until they preview it and tap Apply.
+
 ## License
 
 Personal project — no license file yet; treat as all-rights-reserved until Skylar says otherwise.

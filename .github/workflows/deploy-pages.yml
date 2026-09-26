@@ -1,19 +1,20 @@
-# Deploys app/ (the TRAIN PWA) to GitHub Pages. This is what actually
-# makes app/manifest.json + app/service-worker.js usable -- service
-# workers cannot register on file://, so real installability needs the
-# app served from a real https origin. Opening app/index.html directly
-# as a local file is unaffected either way and keeps working offline.
+# Deploys app/ (the TRAIN PWA) to GitHub Pages -- the live app everyone
+# who installed it runs. Releases come ONLY from `main`: day-to-day work
+# happens on other branches (tested by test.yml) and reaches users only
+# when it's merged/pushed to main. The test harness runs again here and
+# blocks the deploy if anything fails -- above all the schema-migration
+# checks, since a release that upgrades saved data wrong would damage
+# every user's history, not just the developer's.
 #
-# "claude/elegant-dirac-i7ggpx" is listed because it's this repo's only
-# branch today; "main" is included too so this keeps working with no
-# changes needed if/when the project adopts a conventional default
-# branch later.
+# Service workers can't register on file://, so real installability needs
+# the app served from a real https origin; opening app/index.html as a
+# local file is unaffected either way.
 name: Deploy TRAIN to GitHub Pages
 
 on:
   push:
-    branches: ["main", "claude/elegant-dirac-i7ggpx"]
-    paths: ["app/**", ".github/workflows/deploy-pages.yml"]
+    branches: ["main"]
+    paths: ["app/**", "scripts/**", ".github/workflows/deploy-pages.yml"]
   workflow_dispatch:
 
 permissions:
@@ -34,17 +35,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run test harness (blocks the release on any failure)
+        run: node scripts/test-harness.js
       - name: Configure Pages
         uses: actions/configure-pages@v5
         with:
           # enablement: true asks this step to auto-create the Pages site
-          # if none exists yet. In practice the default GITHUB_TOKEN this
-          # workflow runs with isn't allowed to CREATE one (only update an
-          # existing one) -- creating the site the first time still needs
-          # one manual step: repo Settings -> Pages -> Build and
-          # deployment -> Source -> "GitHub Actions". Every run after that
-          # one-time click (including this workflow re-running on its own)
-          # deploys with no further action needed.
+          # if none exists yet. The default GITHUB_TOKEN can't CREATE one
+          # (only update it) -- creating the site the first time needed a
+          # one-time manual step: Settings -> Pages -> Source -> "GitHub
+          # Actions". Already done for this repo.
           enablement: true
       - name: Upload app/ as the Pages artifact
         uses: actions/upload-pages-artifact@v3
