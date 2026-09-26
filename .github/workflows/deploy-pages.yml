@@ -1,7 +1,8 @@
 # Deploys app/ (the TRAIN PWA) to GitHub Pages -- the live app everyone
-# who installed it runs. Releases come ONLY from `main`: day-to-day work
+# who installed it runs. Releases come ONLY from `Main` (the default
+# branch -- GitHub Pages only accepts deploys from it): day-to-day work
 # happens on other branches (tested by test.yml) and reaches users only
-# when it's merged/pushed to main. The test harness runs again here and
+# when it's merged/pushed to Main. The test harness runs again here and
 # blocks the deploy if anything fails -- above all the schema-migration
 # checks, since a release that upgrades saved data wrong would damage
 # every user's history, not just the developer's.
@@ -13,7 +14,7 @@ name: Deploy TRAIN to GitHub Pages
 
 on:
   push:
-    branches: ["main"]
+    branches: ["Main"]
     paths: ["app/**", "scripts/**", ".github/workflows/deploy-pages.yml"]
   workflow_dispatch:
 

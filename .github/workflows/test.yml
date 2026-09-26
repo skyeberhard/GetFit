@@ -1,12 +1,12 @@
 # Runs the test harness on every working branch and every pull request,
-# so a change is known-good before it's merged to main (which is what
+# so a change is known-good before it's merged to Main (which is what
 # actually ships -- see deploy-pages.yml, which runs these tests again
 # right before deploying).
 name: Test
 
 on:
   push:
-    branches-ignore: ["main"]
+    branches-ignore: ["Main", "main"]
   pull_request:
 
 permissions:
