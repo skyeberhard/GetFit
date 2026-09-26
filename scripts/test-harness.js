@@ -1101,6 +1101,87 @@ async function main() {
   check("absurd sets/reps are clamped", hostile.payload.templates.upperA[0].targetSets === 20 && hostile.payload.templates.upperA[0].targetReps === 999);
   check("an absurdly long label is truncated", hostile.payload.labels.upperA.length === 60);
 
+  /* ---- presets: data integrity ---- */
+  const bankNames = new Set(L.DEFAULT_EXERCISE_BANK.map((e) => e.name));
+  check("every preset exercise exists in the built-in bank", L.STARTER_PLANS.every((p) => Object.values(p.planChanges.templates).every((t) => t.exercises.every((e) => bankNames.has(e.name)))));
+  check("every exercise-trait alternative exists in the built-in bank", Object.values(L.EXERCISE_TRAITS).every((t) => (t.alts || []).every((n) => bankNames.has(n))));
+  check("every built-in bank exercise has traits recorded", L.DEFAULT_EXERCISE_BANK.every((e) => !!L.EXERCISE_TRAITS[e.name]));
+  check("every preset assigns all seven weekdays", L.STARTER_PLANS.every((p) => [0, 1, 2, 3, 4, 5, 6].every((d) => p.planChanges.weekPlan[String(d)])));
+  check("every preset's rest days are valid", L.STARTER_PLANS.every((p) => L.validateRestDays(p.planChanges.restDays).valid));
+  check("every preset has a core exercise in every strength workout", L.STARTER_PLANS.every((p) => Object.values(p.planChanges.templates).every((t) => t.exercises.some((e) => (L.DEFAULT_EXERCISE_BANK.find((b) => b.name === e.name) || {}).category === "Core"))));
+  check("every preset parses and applies cleanly on a fresh install", L.STARTER_PLANS.every((p) => {
+    const fresh = L.freshState();
+    const r = L.parsePlanChangePayload(JSON.stringify({ planChanges: p.planChanges }), fresh);
+    return r.valid && r.errors.length === 0 && !!L.applyPlanChanges(fresh, r.payload);
+  }));
+
+  /* ---- presets: tailoring never lets a restricted exercise through ---- */
+  const traitsOf = (n) => L.EXERCISE_TRAITS[n] || {};
+  const equipmentSets = [[], ["dumbbells"], ["bar"], ["dumbbells", "bar", "rope"]];
+  const avoidSets = [[], ["knees"], ["shoulders", "wrists"], ["lowerBack"], ["knees", "shoulders", "lowerBack", "wrists"]];
+  const healthSets = [[], ["injury"], ["pregnant"]];
+  let violations = [];
+  let combos = 0;
+  L.STARTER_PLANS.forEach((p) => equipmentSets.forEach((equipment) => avoidSets.forEach((avoid) => healthSets.forEach((health) => {
+    combos++;
+    const out = L.tailorPlan(p.planChanges, { equipment, avoid, health, minutes: 45, experience: "regular" });
+    Object.values(out.planChanges.templates).forEach((t) => t.exercises.forEach((e) => {
+      const t2 = traitsOf(e.name);
+      const bad = (t2.needs || []).some((n) => equipment.indexOf(n) === -1) ||
+        (t2.stresses || []).some((x) => avoid.indexOf(x) !== -1) ||
+        (t2.impact && health.length) ||
+        ((t2.supine || t2.flexion) && health.indexOf("pregnant") !== -1);
+      if (bad) violations.push(p.id + ": " + e.name);
+    }));
+  }))));
+  check("tailoring never keeps an exercise that conflicts with the answers (" + combos + " combinations)", violations.length === 0);
+  if (violations.length) console.error("  violations:", violations.slice(0, 10));
+
+  const noDb = L.tailorPlan(L.STARTER_PLANS[0].planChanges, { equipment: ["bar", "rope"], minutes: 45, experience: "regular" });
+  check("no dumbbells: a weighted bodyweight-capable move goes unweighted instead of being swapped", noDb.planChanges.templates.lower.exercises.find((e) => e.name === "Reverse Lunge").loaded === false);
+  check("no dumbbells: dumbbell-only moves are swapped, and every swap is reported", noDb.swaps.some((s) => s.from === "Goblet Squat" && s.to === "Bodyweight Squat" && s.reason === "no dumbbells"));
+  const noBar = L.tailorPlan(L.STARTER_PLANS[0].planChanges, { equipment: ["dumbbells", "rope"], minutes: 45, experience: "regular" });
+  check("no pull-up bar: pull-ups become rows without duplicating an existing row", noBar.planChanges.templates.upperA.exercises.filter((e) => e.name === "Dumbbell Row").length === 1 && noBar.swaps.some((s) => s.from === "Pull-Up" && s.to === "Table Row"));
+
+  const short = L.tailorPlan(L.STARTER_PLANS[0].planChanges, { minutes: 20, experience: "regular" });
+  check("20-minute sessions cap each workout at 4 exercises and 3 sets", Object.values(short.planChanges.templates).every((t) => t.exercises.length <= 4 && t.exercises.every((e) => e.targetSets <= 3)));
+  check("trimming for time keeps the core exercise at the end", short.planChanges.templates.upperB.exercises.some((e) => e.name === "Russian Twist" || e.name === "Side Plank"));
+  check("trimmed exercises are counted for the preview", short.trimmed > 0);
+  const newbie = L.tailorPlan(L.STARTER_PLANS[0].planChanges, { experience: "new", minutes: 45 });
+  check("new to training: one fewer set, never below 2", newbie.planChanges.templates.upperA.exercises[0].targetSets === 3 && Object.values(newbie.planChanges.templates).every((t) => t.exercises.every((e) => e.targetSets >= 2)));
+  check("tailoring doesn't mutate the preset", L.STARTER_PLANS[0].planChanges.templates.upperA.exercises[0].targetSets === 4);
+
+  /* ---- presets: recommendations ---- */
+  const top = (answers) => L.recommendPresets(answers)[0].preset.id;
+  check("new, 3 days, 30 min, general fitness -> Foundations", top({ goal: "fitness", days: 3, minutes: 30, equipment: ["dumbbells"], experience: "new" }) === "foundations");
+  check("regular, 4 days, 45 min, build muscle -> Upper / Lower", top({ goal: "muscle", days: 4, minutes: 45, equipment: ["dumbbells", "bar"], experience: "regular" }) === "upper-lower");
+  check("regular, 5 days, full equipment, build muscle -> Reacher Hybrid", top({ goal: "muscle", days: 5, minutes: 45, equipment: ["dumbbells", "bar", "rope", "bike"], experience: "regular" }) === "reacher-hybrid");
+  check("no equipment -> Bodyweight Only", top({ goal: "fitness", days: 4, minutes: 30, equipment: [], experience: "returning" }) === "bodyweight");
+  check("20 minutes -> 20-Minute Express", top({ goal: "fatloss", days: 3, minutes: 20, equipment: ["dumbbells"], experience: "returning" }) === "express");
+  check("a health consideration -> Low-Impact first", top({ goal: "muscle", days: 5, minutes: 45, equipment: ["dumbbells", "bar"], experience: "regular", health: ["injury"] }) === "low-impact");
+  check("going easy on knees alone doesn't push a muscle-building regular onto the gentle plan", top({ goal: "muscle", days: 4, minutes: 45, equipment: ["dumbbells"], experience: "regular", avoid: ["knees"] }) === "upper-lower");
+  check("recommendations always list every preset", L.recommendPresets({}).length === L.STARTER_PLANS.length);
+
+  /* ---- intro: schema v8 + removing unused default workouts ---- */
+  const v7Blob = Object.assign({}, L.freshState(), { schemaVersion: 7 });
+  delete v7Blob.onboarded; delete v7Blob.profile;
+  v7Blob.exerciseBank = L.removeBankEntry(L.removeBankEntry(v7Blob.exerciseBank, "Bird Dog"), "Burpee");
+  const fromV7 = L.migrate(v7Blob);
+  check("v7->v8: an existing account is marked onboarded (no intro)", fromV7.onboarded === true && fromV7.profile === null && fromV7.schemaVersion === L.SCHEMA_VERSION);
+  check("v7->v8: adds the new bank exercises without restoring ones the user removed", !!fromV7.exerciseBank["Bird Dog"] && !fromV7.exerciseBank["Burpee"]);
+  check("a brand-new install starts un-onboarded", L.freshState().onboarded === false);
+
+  const introState = L.freshState();
+  const fdn = L.STARTER_PLANS.find((p) => p.id === "foundations").planChanges;
+  const withRemoval = Object.assign({}, fdn, { removeTemplates: ["upperA", "lower", "upperB", "cardio"] });
+  const parsedRemoval = L.parsePlanChangePayload(JSON.stringify({ planChanges: withRemoval }), introState);
+  check("plan import removes unused default workouts but refuses the cardio template", parsedRemoval.payload.removeTemplates.join(",") === "upperA,lower,upperB" && parsedRemoval.errors.some((e) => e.indexOf("cardio") !== -1));
+  const appliedRemoval = L.applyPlanChanges(introState, parsedRemoval.payload);
+  check("after the intro, the library holds only the chosen plan plus cardio", L.getTemplateIds(appliedRemoval).sort().join(",") === "cardio,fd-a,fd-b");
+  check("removals are shown in the preview", L.diffPlanChanges(introState, parsedRemoval.payload).some((d) => d.isRemoval && d.templateId === "upperA"));
+  const stillUsed = L.parsePlanChangePayload(JSON.stringify({ planChanges: { removeTemplates: ["upperA"] } }), L.freshState());
+  check("plan import won't remove a workout still assigned to a weekday", stillUsed.valid === false && stillUsed.errors[0].indexOf("still assigned") !== -1);
+
   /* ---- daysBetween (backup reminder) ---- */
   check("daysBetween is null for no timestamp", L.daysBetween(null, new Date("2026-09-25T00:00:00.000Z")) === null);
   check("daysBetween is null for an unparseable timestamp", L.daysBetween("not a date", new Date("2026-09-25T00:00:00.000Z")) === null);

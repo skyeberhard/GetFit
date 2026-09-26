@@ -300,6 +300,11 @@
   .cat-chips .swatch{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle;}
   .cat-chips button.on .swatch{box-shadow:0 0 0 1.5px rgba(0,0,0,.55);}
   .bank-list{max-height:320px;overflow-y:auto;}
+  .onb-wordmark{font-family:var(--display);font-weight:800;font-size:30px;letter-spacing:.3em;text-transform:uppercase;color:var(--accent);text-shadow:0 0 14px color-mix(in srgb,var(--accent) 45%,transparent);animation:crt-warmup 1.4s ease-out both;}
+  .preset-card{border:1px solid var(--border-strong);border-radius:var(--radius);padding:12px 14px;margin-bottom:10px;background:var(--s1);}
+  .preset-card.best{border-color:var(--accent);}
+  .preset-title{font-family:var(--display);font-weight:700;font-size:17px;}
+  .preset-meta{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text-dim);margin-top:2px;}
 
   .history-item{border-bottom:1px solid var(--border);padding:11px 0;}
   .history-item:last-child{border-bottom:none;}
@@ -496,7 +501,7 @@
     </div>
 
     <div class="panel">
-      <h2>Weekly Plan</h2>
+      <h2>Weekly Plan <button class="btn ghost sm" data-action="open-find-plan">Find a Plan…</button></h2>
       <div class="muted" style="margin-bottom:10px;">Assign a workout to each training day. Rest days (above) override this.</div>
       <div id="weekPlanEditor"></div>
     </div>
@@ -624,7 +629,7 @@
 (function (root) {
   "use strict";
 
-  var SCHEMA_VERSION = 7;
+  var SCHEMA_VERSION = 8;
 
   var WEEKDAY_LABELS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 
@@ -1449,6 +1454,10 @@
       state = migrateV6ToV7(state);
       version = 7;
     }
+    if (version === 7) {
+      state = migrateV7ToV8(state);
+      version = 8;
+    }
     state.schemaVersion = SCHEMA_VERSION;
     return state;
   }
@@ -1588,6 +1597,18 @@
     return next;
   }
 
+  // Adds `onboarded` (whether the first-run intro has been done) and
+  // `profile` (the intro's answers). Any account being migrated already
+  // exists and is set up, so it's marked onboarded -- only a brand-new
+  // install (freshState) sees the intro. Also adds the v8 bank exercises.
+  function migrateV7ToV8(state) {
+    var next = Object.assign({}, state);
+    next.onboarded = true;
+    if (next.profile === undefined) next.profile = null;
+    next.exerciseBank = addMissingToBank(next.exerciseBank, DEFAULT_EXERCISE_BANK.filter(function (e) { return BANK_ADDED_IN_V8.indexOf(e.name) !== -1; }));
+    return next;
+  }
+
   function cloneTemplates(templates) {
     return JSON.parse(JSON.stringify(templates));
   }
@@ -1622,6 +1643,8 @@
     state.deloadWeeks = {};
     state.baselinesAuto = true;
     state.exerciseBank = seedExerciseBank(state);
+    state.onboarded = false;
+    state.profile = null;
     return state;
   }
 
@@ -1701,8 +1724,29 @@
     bankDef("Jump Rope", "Conditioning", "seconds", false, 5, 60),
     bankDef("Mountain Climber", "Conditioning", "seconds", false, 3, 30),
     bankDef("Bear Crawl", "Conditioning", "seconds", false, 3, 30),
-    bankDef("High Knees", "Conditioning", "seconds", false, 3, 30)
+    bankDef("High Knees", "Conditioning", "seconds", false, 3, 30),
+    // Added in schema v8 (alternatives the presets can swap to) -- see
+    // BANK_ADDED_IN_V8 for why they're listed separately.
+    bankDef("Incline Push-Up", "Push", "reps", false, 3, 10),
+    bankDef("Knee Push-Up", "Push", "reps", false, 3, 10),
+    bankDef("Floor Press", "Push", "reps", true, 3, 8, 12),
+    bankDef("Table Row", "Pull", "reps", false, 3, 8),
+    bankDef("Reverse Snow Angel", "Pull", "reps", false, 3, 12),
+    bankDef("Bodyweight Squat", "Legs", "reps", false, 3, 15),
+    bankDef("Split Squat", "Legs", "reps", true, 3, 8, 12),
+    bankDef("Step-Up", "Legs", "reps", true, 3, 8, 12),
+    bankDef("Single-Leg Glute Bridge", "Legs", "reps", false, 3, 10),
+    bankDef("Wall Sit", "Legs", "seconds", false, 3, 30),
+    bankDef("Bird Dog", "Core", "reps", false, 3, 8),
+    bankDef("Reverse Crunch", "Core", "reps", false, 3, 12),
+    bankDef("Superman", "Core", "reps", false, 3, 12),
+    bankDef("Step Jack", "Conditioning", "seconds", false, 4, 40),
+    bankDef("Shadow Boxing", "Conditioning", "seconds", false, 3, 45)
   ];
+  // Existing accounts got their bank seeded at v7; these are added to it
+  // at v8 without re-adding anything a user has since removed.
+  var BANK_ADDED_IN_V8 = ["Incline Push-Up", "Knee Push-Up", "Floor Press", "Table Row", "Reverse Snow Angel", "Bodyweight Squat", "Split Squat",
+    "Step-Up", "Single-Leg Glute Bridge", "Wall Sit", "Bird Dog", "Reverse Crunch", "Superman", "Step Jack", "Shadow Boxing"];
   var BUILTIN_BANK_BY_NAME = {};
   DEFAULT_EXERCISE_BANK.forEach(function (e) { BUILTIN_BANK_BY_NAME[e.name] = e; });
 
@@ -1789,12 +1833,130 @@
     return t;
   }
 
-  /* ---------- starter plans (ship with the app, applied via the same
-     preview-then-apply path as a pasted plan-change import) ---------- */
+  /* ---------- exercise traits: what each exercise needs and stresses ----------
+     Drives tailorPlan: an exercise someone can't or shouldn't do (missing
+     equipment, a body area they asked to go easy on, jumping when they've
+     flagged a health consideration) is swapped for the first listed
+     alternative that fits, or dropped if none does.
+       needs:    equipment required ("dumbbells", "bar", "rope")
+       stresses: areas it loads meaningfully ("knees", "shoulders", "lowerBack", "wrists")
+       impact:   involves jumping/landing
+       supine:   done lying on your back
+       flexion:  crunch-style spinal flexion
+       bodyweightOk: normally weighted, but fine unweighted with no dumbbells
+     This is general fitness guidance, not medical advice -- the intro tells
+     anyone who flags a health consideration to check with a professional. */
+  var EXERCISE_TRAITS = {
+    "Push-Up": { stresses: ["wrists", "shoulders"], bodyweightOk: true, alts: ["Incline Push-Up", "Floor Press", "Dumbbell Press"] },
+    "Incline Push-Up": { stresses: ["wrists"], alts: ["Floor Press", "Dumbbell Press"] },
+    "Knee Push-Up": { stresses: ["wrists"], alts: ["Incline Push-Up", "Floor Press"] },
+    "Clapping Push-Up": { impact: true, stresses: ["wrists", "shoulders"], alts: ["Push-Up", "Incline Push-Up", "Floor Press"] },
+    "Pike Push-Up": { stresses: ["wrists", "shoulders"], alts: ["Dumbbell Shoulder Press", "Push-Up", "Incline Push-Up"] },
+    "Tricep Dip": { stresses: ["shoulders", "wrists"], bodyweightOk: true, alts: ["Overhead Tricep Extension", "Knee Push-Up", "Floor Press"] },
+    "Dumbbell Press": { needs: ["dumbbells"], supine: true, alts: ["Floor Press", "Push-Up", "Incline Push-Up"] },
+    "Floor Press": { needs: ["dumbbells"], supine: true, alts: ["Incline Push-Up", "Push-Up"] },
+    "Dumbbell Shoulder Press": { needs: ["dumbbells"], stresses: ["shoulders"], alts: ["Pike Push-Up", "Floor Press", "Incline Push-Up"] },
+    "Lateral Raise": { needs: ["dumbbells"], stresses: ["shoulders"], alts: ["Reverse Snow Angel"] },
+    "Overhead Tricep Extension": { needs: ["dumbbells"], stresses: ["shoulders"], alts: ["Tricep Dip", "Knee Push-Up"] },
+    "Pull-Up": { needs: ["bar"], stresses: ["shoulders"], bodyweightOk: true, alts: ["Dumbbell Row", "Table Row", "Reverse Snow Angel"] },
+    "Chin-Up": { needs: ["bar"], stresses: ["shoulders"], bodyweightOk: true, alts: ["Dumbbell Row", "Table Row", "Reverse Snow Angel"] },
+    "Dumbbell Row": { needs: ["dumbbells"], alts: ["Table Row", "Reverse Snow Angel"] },
+    "Table Row": { alts: ["Reverse Snow Angel"] },
+    "Reverse Fly": { needs: ["dumbbells"], alts: ["Reverse Snow Angel"] },
+    "Dumbbell Curl": { needs: ["dumbbells"], alts: ["Chin-Up", "Table Row"] },
+    "Hammer Curl": { needs: ["dumbbells"], alts: ["Chin-Up", "Table Row"] },
+    "Reverse Snow Angel": {},
+    "Goblet Squat": { needs: ["dumbbells"], stresses: ["knees"], alts: ["Bodyweight Squat", "Glute Bridge", "Step-Up"] },
+    "Bodyweight Squat": { stresses: ["knees"], alts: ["Glute Bridge", "Single-Leg Glute Bridge", "Step-Up"] },
+    "Reverse Lunge": { stresses: ["knees"], bodyweightOk: true, alts: ["Single-Leg Glute Bridge", "Glute Bridge", "Step-Up"] },
+    "Split Squat": { stresses: ["knees"], bodyweightOk: true, alts: ["Single-Leg Glute Bridge", "Glute Bridge"] },
+    "Bulgarian Split Squat": { stresses: ["knees"], bodyweightOk: true, alts: ["Split Squat", "Single-Leg Glute Bridge", "Step-Up"] },
+    "Step-Up": { stresses: ["knees"], bodyweightOk: true, alts: ["Glute Bridge", "Single-Leg Glute Bridge"] },
+    "Wall Sit": { stresses: ["knees"], alts: ["Glute Bridge", "Step-Up"] },
+    "Dumbbell RDL": { needs: ["dumbbells"], stresses: ["lowerBack"], alts: ["Single-Leg Glute Bridge", "Glute Bridge", "Step-Up"] },
+    "Glute Bridge": { supine: true, alts: ["Step-Up", "Split Squat"] },
+    "Single-Leg Glute Bridge": { supine: true, alts: ["Step-Up", "Split Squat"] },
+    "Calf Raise": { bodyweightOk: true },
+    "Plank": { alts: ["Bird Dog", "Dead Bug"] },
+    "Side Plank": { alts: ["Bird Dog"] },
+    "Hollow Hold": { stresses: ["lowerBack"], supine: true, flexion: true, alts: ["Dead Bug", "Bird Dog"] },
+    "Dead Bug": { supine: true, alts: ["Bird Dog", "Side Plank"] },
+    "Bird Dog": {},
+    "Superman": { stresses: ["lowerBack"], alts: ["Bird Dog", "Reverse Snow Angel"] },
+    "Hanging Leg Raise": { needs: ["bar"], stresses: ["shoulders", "lowerBack"], flexion: true, alts: ["Reverse Crunch", "Dead Bug", "Bird Dog"] },
+    "Hanging Knee Tuck": { needs: ["bar"], stresses: ["shoulders"], flexion: true, alts: ["Reverse Crunch", "Dead Bug", "Bird Dog"] },
+    "Reverse Crunch": { supine: true, flexion: true, alts: ["Dead Bug", "Bird Dog"] },
+    "Bicycle Crunch": { supine: true, flexion: true, alts: ["Dead Bug", "Side Plank", "Bird Dog"] },
+    "Russian Twist": { stresses: ["lowerBack"], flexion: true, bodyweightOk: true, alts: ["Side Plank", "Dead Bug", "Bird Dog"] },
+    "Jump Squat": { impact: true, stresses: ["knees"], alts: ["Bodyweight Squat", "Step-Up", "Glute Bridge"] },
+    "Burpee": { impact: true, stresses: ["wrists", "knees", "shoulders"], alts: ["Step Jack", "Shadow Boxing"] },
+    "Jump Rope": { needs: ["rope"], impact: true, alts: ["Step Jack", "Shadow Boxing"] },
+    "High Knees": { impact: true, alts: ["Step Jack", "Shadow Boxing"] },
+    "Mountain Climber": { stresses: ["wrists"], alts: ["Step Jack", "Shadow Boxing"] },
+    "Bear Crawl": { stresses: ["wrists", "shoulders"], alts: ["Bird Dog", "Dead Bug"] },
+    "Step Jack": {},
+    "Shadow Boxing": {}
+  };
+
+  var AVOID_AREAS = ["knees", "shoulders", "lowerBack", "wrists"];
+  var HEALTH_FLAGS = ["pregnant", "injury", "condition", "pain"];
+  var EQUIPMENT = ["dumbbells", "bar", "bike", "rope"];
+
+  var RESTRICTION_REASONS = {
+    dumbbells: "no dumbbells", bar: "no pull-up bar", rope: "no jump rope",
+    knees: "easy on knees", shoulders: "easy on shoulders", lowerBack: "easy on lower back", wrists: "easy on wrists",
+    impact: "no jumping", pregnancy: "pregnancy / postpartum"
+  };
+
+  // Fills gaps so every downstream function sees a complete answer set.
+  // Unanswered equipment means "has everything" (no swaps) -- the intro
+  // always asks, so this only matters for callers passing partial answers.
+  function normalizeAnswers(answers) {
+    var a = answers || {};
+    var pick = function (list, allowed) { return (Array.isArray(list) ? list : []).filter(function (x, i, arr) { return allowed.indexOf(x) !== -1 && arr.indexOf(x) === i; }); };
+    return {
+      goal: ["muscle", "fitness", "endurance", "fatloss"].indexOf(a.goal) !== -1 ? a.goal : "fitness",
+      days: [3, 4, 5].indexOf(Number(a.days)) !== -1 ? Number(a.days) : 4,
+      minutes: [20, 30, 45].indexOf(Number(a.minutes)) !== -1 ? Number(a.minutes) : 45,
+      equipment: Array.isArray(a.equipment) ? pick(a.equipment, EQUIPMENT) : EQUIPMENT.slice(),
+      experience: ["new", "returning", "regular"].indexOf(a.experience) !== -1 ? a.experience : "returning",
+      health: pick(a.health, HEALTH_FLAGS),
+      avoid: pick(a.avoid, AVOID_AREAS)
+    };
+  }
+
+  // Why an exercise doesn't fit these answers, or null if it does.
+  function restrictionFor(name, a) {
+    var t = EXERCISE_TRAITS[name] || {};
+    var needs = t.needs || [];
+    for (var i = 0; i < needs.length; i++) if (a.equipment.indexOf(needs[i]) === -1) return RESTRICTION_REASONS[needs[i]];
+    var stresses = t.stresses || [];
+    for (var j = 0; j < stresses.length; j++) if (a.avoid.indexOf(stresses[j]) !== -1) return RESTRICTION_REASONS[stresses[j]];
+    if (t.impact && a.health.length) return RESTRICTION_REASONS.impact;
+    if ((t.supine || t.flexion) && a.health.indexOf("pregnant") !== -1) return RESTRICTION_REASONS.pregnancy;
+    return null;
+  }
+
+  function presetExercise(name, sets, reps, max, overrides) {
+    var base = BUILTIN_BANK_BY_NAME[name];
+    var def = { name: name, metric: base.metric, loaded: base.loaded, targetSets: sets, targetReps: reps };
+    if (overrides) Object.keys(overrides).forEach(function (k) { def[k] = overrides[k]; });
+    if (max && def.loaded) def.targetRepsMax = max;
+    return def;
+  }
+
+  /* Presets: hand-written plans, then adjusted per person by tailorPlan.
+     Every preset assigns all 7 weekdays (rest days point at cardio, the
+     one template that always exists) so nothing is left pointing at a
+     workout the intro removes. Metadata drives recommendPresets:
+       days: training days/week (incl. any cardio day), minutes: typical
+       session length, lowImpact: no jumping, jointFriendly: built for
+       people working around pain, injury or a health consideration. */
   var STARTER_PLANS = [{
     id: "reacher-hybrid",
     label: "Reacher Hybrid",
     description: "Upper push/pull, legs & core, explosive power, full-body dumbbell, a weekly run — rest Wed/Sun, core in every strength day.",
+    days: 5, minutes: 45, level: "Intermediate", goals: ["muscle", "fitness"], lowImpact: false, jointFriendly: false,
     planChanges: {
       templates: {
         upperA: { label: "Upper Body — Push/Pull", focus: ["Push", "Pull", "Core"], exercises: [
@@ -1830,7 +1992,251 @@
       weekPlan: { "0": "cardio", "1": "upperA", "2": "lower", "3": "cardio", "4": "explosive", "5": "upperB", "6": "cardio" },
       restDays: [0, 3]
     }
+  }, {
+    id: "foundations",
+    label: "Foundations",
+    description: "Two alternating full-body workouts, three days a week. The basics — squat, hinge, push, pull, core — with room to learn them.",
+    days: 3, minutes: 30, level: "Beginner", goals: ["fitness", "muscle", "fatloss"], lowImpact: true, jointFriendly: false,
+    planChanges: {
+      templates: {
+        "fd-a": { label: "Full Body A", focus: ["Legs", "Push", "Pull", "Core"], exercises: [
+          presetExercise("Goblet Squat", 3, 10, 15),
+          presetExercise("Incline Push-Up", 3, 8),
+          presetExercise("Dumbbell Row", 3, 10, 14),
+          presetExercise("Glute Bridge", 3, 12),
+          presetExercise("Dead Bug", 3, 8)
+        ] },
+        "fd-b": { label: "Full Body B", focus: ["Legs", "Push", "Pull", "Core"], exercises: [
+          presetExercise("Reverse Lunge", 3, 8, 12),
+          presetExercise("Dumbbell Shoulder Press", 3, 8, 12),
+          presetExercise("Dumbbell RDL", 3, 10, 14),
+          presetExercise("Bird Dog", 3, 8),
+          presetExercise("Side Plank", 2, 20)
+        ] }
+      },
+      weekPlan: { "0": "cardio", "1": "fd-a", "2": "cardio", "3": "fd-b", "4": "cardio", "5": "fd-a", "6": "cardio" },
+      restDays: [0, 2, 4, 6]
+    }
+  }, {
+    id: "upper-lower",
+    label: "Upper / Lower",
+    description: "Four dumbbell days — upper, lower, rest, upper, lower. Each muscle group gets trained twice a week, the usual sweet spot for building muscle.",
+    days: 4, minutes: 45, level: "Intermediate", goals: ["muscle"], lowImpact: true, jointFriendly: false,
+    planChanges: {
+      templates: {
+        "ul-upper-a": { label: "Upper A", focus: ["Push", "Pull", "Core"], exercises: [
+          presetExercise("Dumbbell Press", 4, 8, 12),
+          presetExercise("Dumbbell Row", 4, 8, 12),
+          presetExercise("Dumbbell Shoulder Press", 3, 8, 12),
+          presetExercise("Overhead Tricep Extension", 3, 10, 14),
+          presetExercise("Dead Bug", 3, 10)
+        ] },
+        "ul-lower-a": { label: "Lower A", focus: ["Legs", "Core"], exercises: [
+          presetExercise("Goblet Squat", 4, 10, 15),
+          presetExercise("Dumbbell RDL", 4, 8, 12),
+          presetExercise("Reverse Lunge", 3, 10, 12),
+          presetExercise("Calf Raise", 3, 15, 25),
+          presetExercise("Plank", 3, 45)
+        ] },
+        "ul-upper-b": { label: "Upper B", focus: ["Push", "Pull", "Core"], exercises: [
+          presetExercise("Pull-Up", 4, 6, 10),
+          presetExercise("Push-Up", 4, 12, 20),
+          presetExercise("Reverse Fly", 3, 12, 15),
+          presetExercise("Lateral Raise", 3, 12, 15),
+          presetExercise("Hammer Curl", 3, 10, 14),
+          presetExercise("Side Plank", 3, 30)
+        ] },
+        "ul-lower-b": { label: "Lower B", focus: ["Legs", "Core"], exercises: [
+          presetExercise("Bulgarian Split Squat", 3, 8, 12),
+          presetExercise("Step-Up", 3, 10, 12),
+          presetExercise("Single-Leg Glute Bridge", 3, 10),
+          presetExercise("Calf Raise", 3, 15, 25),
+          presetExercise("Hanging Leg Raise", 3, 10)
+        ] }
+      },
+      weekPlan: { "0": "cardio", "1": "ul-upper-a", "2": "ul-lower-a", "3": "cardio", "4": "ul-upper-b", "5": "ul-lower-b", "6": "cardio" },
+      restDays: [0, 3, 6]
+    }
+  }, {
+    id: "bodyweight",
+    label: "Bodyweight Only",
+    description: "No equipment at all: three full-body strength days plus a conditioning-and-core day. Works in a hotel room.",
+    days: 4, minutes: 30, level: "All levels", goals: ["fitness", "fatloss", "endurance"], lowImpact: true, jointFriendly: false,
+    planChanges: {
+      templates: {
+        "bw-a": { label: "Bodyweight A", focus: ["Legs", "Push", "Pull", "Core"], exercises: [
+          presetExercise("Bodyweight Squat", 3, 15),
+          presetExercise("Push-Up", 3, 10, null, { loaded: false }),
+          presetExercise("Table Row", 3, 8),
+          presetExercise("Glute Bridge", 3, 15),
+          presetExercise("Plank", 3, 40)
+        ] },
+        "bw-b": { label: "Bodyweight B", focus: ["Legs", "Push", "Pull", "Core"], exercises: [
+          presetExercise("Reverse Lunge", 3, 10, null, { loaded: false }),
+          presetExercise("Pike Push-Up", 3, 6),
+          presetExercise("Reverse Snow Angel", 3, 12),
+          presetExercise("Single-Leg Glute Bridge", 3, 10),
+          presetExercise("Side Plank", 3, 25)
+        ] },
+        "bw-cond": { label: "Conditioning & Core", focus: ["Conditioning", "Core"], exercises: [
+          presetExercise("Step Jack", 4, 40),
+          presetExercise("Mountain Climber", 3, 30),
+          presetExercise("Shadow Boxing", 3, 45),
+          presetExercise("Bird Dog", 3, 10),
+          presetExercise("Dead Bug", 3, 10)
+        ] }
+      },
+      weekPlan: { "0": "cardio", "1": "bw-a", "2": "cardio", "3": "bw-b", "4": "cardio", "5": "bw-a", "6": "bw-cond" },
+      restDays: [0, 2, 4]
+    }
+  }, {
+    id: "express",
+    label: "20-Minute Express",
+    description: "Three short sessions — upper, lower, full-body finisher — four exercises each. For weeks when time is the constraint.",
+    days: 3, minutes: 20, level: "All levels", goals: ["fitness", "fatloss"], lowImpact: false, jointFriendly: false,
+    planChanges: {
+      templates: {
+        "ex-a": { label: "Express Upper", focus: ["Push", "Pull", "Core"], exercises: [
+          presetExercise("Push-Up", 3, 10, 15),
+          presetExercise("Dumbbell Row", 3, 10, 14),
+          presetExercise("Dumbbell Shoulder Press", 2, 8, 12),
+          presetExercise("Plank", 2, 40)
+        ] },
+        "ex-b": { label: "Express Lower", focus: ["Legs", "Core"], exercises: [
+          presetExercise("Goblet Squat", 3, 10, 15),
+          presetExercise("Reverse Lunge", 2, 10, 12),
+          presetExercise("Glute Bridge", 3, 15),
+          presetExercise("Dead Bug", 2, 10)
+        ] },
+        "ex-c": { label: "Express Full Body", focus: ["Conditioning", "Legs", "Push", "Core"], exercises: [
+          presetExercise("Jump Squat", 3, 10),
+          presetExercise("Push-Up", 3, 10, 15),
+          presetExercise("Dumbbell RDL", 3, 10, 14),
+          presetExercise("Bicycle Crunch", 2, 20)
+        ] }
+      },
+      weekPlan: { "0": "cardio", "1": "ex-a", "2": "cardio", "3": "ex-b", "4": "cardio", "5": "ex-c", "6": "cardio" },
+      restDays: [0, 2, 4, 6]
+    }
+  }, {
+    id: "low-impact",
+    label: "Low-Impact / Joint-Friendly",
+    description: "No jumping, supported positions, lighter loads — two alternating strength days plus an easy cardio day. A gentle place to start or restart.",
+    days: 4, minutes: 30, level: "Beginner", goals: ["fitness"], lowImpact: true, jointFriendly: true,
+    planChanges: {
+      templates: {
+        "li-a": { label: "Gentle Strength A", focus: ["Legs", "Push", "Pull", "Core"], exercises: [
+          presetExercise("Glute Bridge", 3, 12),
+          presetExercise("Incline Push-Up", 3, 8),
+          presetExercise("Dumbbell Row", 3, 10, 14),
+          presetExercise("Bird Dog", 3, 8),
+          presetExercise("Side Plank", 2, 20)
+        ] },
+        "li-b": { label: "Gentle Strength B", focus: ["Legs", "Push", "Pull", "Core"], exercises: [
+          presetExercise("Step-Up", 3, 8, 12),
+          presetExercise("Floor Press", 3, 8, 12),
+          presetExercise("Reverse Snow Angel", 3, 10),
+          presetExercise("Dumbbell RDL", 2, 10, 12),
+          presetExercise("Dead Bug", 3, 8)
+        ] }
+      },
+      weekPlan: { "0": "cardio", "1": "li-a", "2": "cardio", "3": "li-b", "4": "cardio", "5": "li-a", "6": "cardio" },
+      restDays: [0, 2, 4]
+    }
   }];
+
+  /* Adjusts a preset to one person's answers without changing its shape:
+       - an exercise that doesn't fit (equipment, an area to go easy on,
+         jumping with a health flag, lying-on-back/crunch work when
+         pregnant/postpartum) becomes its first fitting alternative, or is
+         dropped if none fits -- every change is reported in `swaps`;
+       - normally-weighted bodyweight-capable moves go unweighted with no dumbbells;
+       - 20/30-minute sessions cap exercises (4/5) and sets (3), keeping a
+         core exercise at the end rather than trimming it off;
+       - "new" trims one set (min 2) from everything.
+     A workout left with nothing is removed and its days fall back to cardio. */
+  function tailorPlan(planChanges, answers) {
+    var a = normalizeAnswers(answers);
+    var plan = JSON.parse(JSON.stringify(planChanges));
+    var swaps = [];
+    var trimmed = 0;
+    var maxExercises = a.minutes <= 20 ? 4 : (a.minutes <= 30 ? 5 : Infinity);
+    var maxSets = a.minutes <= 30 ? 3 : Infinity;
+    Object.keys(plan.templates || {}).forEach(function (id) {
+      var t = plan.templates[id];
+      var original = (t.exercises || []).map(function (e) { return e.name; });
+      var out = [];
+      var taken = function (name) { return out.some(function (e) { return e.name === name; }) || original.indexOf(name) !== -1; };
+      (t.exercises || []).forEach(function (ex) {
+        var chosen = ex;
+        var reason = restrictionFor(ex.name, a);
+        if (reason) {
+          var alts = (EXERCISE_TRAITS[ex.name] && EXERCISE_TRAITS[ex.name].alts) || [];
+          var alt = null;
+          for (var i = 0; i < alts.length && !alt; i++) {
+            if (BUILTIN_BANK_BY_NAME[alts[i]] && !restrictionFor(alts[i], a) && !taken(alts[i])) alt = alts[i];
+          }
+          swaps.push({ workout: t.label, from: ex.name, to: alt, reason: reason });
+          if (!alt) return;
+          chosen = bankEntryToTemplateDef(BUILTIN_BANK_BY_NAME[alt]);
+          chosen.targetSets = ex.targetSets;
+        }
+        chosen = JSON.parse(JSON.stringify(chosen));
+        if (chosen.loaded && a.equipment.indexOf("dumbbells") === -1 && (EXERCISE_TRAITS[chosen.name] || {}).bodyweightOk) {
+          chosen.loaded = false;
+          delete chosen.targetRepsMax;
+        }
+        if (a.experience === "new") chosen.targetSets = Math.max(2, chosen.targetSets - 1);
+        chosen.targetSets = Math.min(chosen.targetSets, maxSets);
+        out.push(chosen);
+      });
+      if (out.length > maxExercises) {
+        var coreIndex = -1;
+        for (var k = maxExercises - 1; k < out.length; k++) {
+          var b = BUILTIN_BANK_BY_NAME[out[k].name];
+          if (b && b.category === "Core") { coreIndex = k; break; }
+        }
+        var kept = coreIndex === -1 ? out.slice(0, maxExercises) : out.slice(0, maxExercises - 1).concat([out[coreIndex]]);
+        trimmed += out.length - kept.length;
+        out = kept;
+      }
+      t.exercises = out;
+    });
+    Object.keys(plan.templates || {}).forEach(function (id) {
+      if (plan.templates[id].exercises.length) return;
+      delete plan.templates[id];
+      Object.keys(plan.weekPlan || {}).forEach(function (d) { if (plan.weekPlan[d] === id) plan.weekPlan[d] = "cardio"; });
+    });
+    return { planChanges: plan, swaps: swaps, trimmed: trimmed };
+  }
+
+  // Ranks every preset for these answers (best first). Nothing is hidden --
+  // the intro shows the whole list with the top one marked.
+  function recommendPresets(answers) {
+    var a = normalizeAnswers(answers);
+    var careful = a.health.length > 0 || a.avoid.length > 0;
+    return STARTER_PLANS.map(function (p, order) {
+      var score = 0;
+      var tailored = tailorPlan(p.planChanges, a);
+      if (p.days === a.days) score += 3; else if (Math.abs(p.days - a.days) === 1) score += 1; else score -= 2;
+      if (p.minutes <= a.minutes) score += 2; else if (p.minutes - a.minutes > 15) score -= 2; else score -= 1;
+      if (a.minutes === 20 && p.minutes === 20) score += 2;
+      score += p.goals.indexOf(a.goal) !== -1 ? 2 : -1;
+      if (a.experience === "new") score += p.level === "Beginner" ? 2 : (p.level === "Intermediate" ? -2 : 0);
+      if (a.experience === "regular" && p.level === "Intermediate") score += 2;
+      // A health consideration leads with the gentle plan; areas to go
+      // easy on alone mostly just need swaps; and the gentle plan is held
+      // back for everyone else, since it's deliberately light.
+      if (a.health.length) score += p.jointFriendly ? 6 : (p.lowImpact ? 0 : -5);
+      else if (a.avoid.length) score += p.jointFriendly ? 1 : 0;
+      if (!careful && p.jointFriendly) score -= 2;
+      if (a.equipment.indexOf("dumbbells") === -1 && p.id === "bodyweight") score += 3;
+      // Swaps are handled, so they only nudge: a plan that needs many is a
+      // slightly worse fit, not a disqualified one.
+      score -= Math.min(2, tailored.swaps.length * 0.25);
+      return { preset: p, score: score, order: order, swaps: tailored.swaps.length };
+    }).sort(function (x, y) { return (y.score - x.score) || (x.order - y.order); });
+  }
 
   /* ---------- share links ----------
      A plan travels as ...index.html#plan=<token>. The token is the
@@ -2064,6 +2470,23 @@
       });
     }
 
+    // Optional: workouts to remove (the intro uses this to clear untouched
+    // default workouts a preset doesn't use). Only allowed when nothing in
+    // the resulting weekly plan still points at it; history is unaffected
+    // either way, since past sessions keep their own snapshot.
+    var removeTemplates = [];
+    if (Array.isArray(changes.removeTemplates)) {
+      var existing = getTemplates(state);
+      var resultingWeek = Object.assign({}, (state && state.weekPlan) || {}, weekPlan);
+      changes.removeTemplates.forEach(function (id) {
+        if (!state || validIds.indexOf(id) === -1 || templates[id] || removeTemplates.indexOf(id) !== -1) return;
+        if (existing[id].isCardio) { errors.push('"' + id + '" is the cardio template and can’t be removed — skipped.'); return; }
+        var usedOn = Object.keys(resultingWeek).filter(function (d) { return resultingWeek[d] === id; });
+        if (usedOn.length) { errors.push('"' + existing[id].label + '" is still assigned to ' + usedOn.map(function (d) { return WEEKDAY_LABELS[d]; }).join(", ") + " — not removed."); return; }
+        removeTemplates.push(id);
+      });
+    }
+
     if (changes.restDays !== undefined) {
       var days = Array.isArray(changes.restDays) ? changes.restDays.map(Number).filter(function (d, i, arr) {
         return d >= 0 && d <= 6 && Math.floor(d) === d && arr.indexOf(d) === i;
@@ -2073,7 +2496,7 @@
       else restDays = days;
     }
 
-    var hasAnything = Object.keys(templates).length > 0 || Object.keys(weekPlan).length > 0 || !!restDays;
+    var hasAnything = Object.keys(templates).length > 0 || Object.keys(weekPlan).length > 0 || !!restDays || removeTemplates.length > 0;
     if (!hasAnything && !errors.length) {
       errors.push("No template, weekly-plan, or rest-day changes found in that text.");
     }
@@ -2081,7 +2504,7 @@
     return {
       valid: hasAnything,
       errors: errors,
-      payload: hasAnything ? { templates: templates, labels: labels, focus: focus, categories: categories, weekPlan: weekPlan, restDays: restDays } : null
+      payload: hasAnything ? { templates: templates, labels: labels, focus: focus, categories: categories, weekPlan: weekPlan, restDays: restDays, removeTemplates: removeTemplates } : null
     };
   }
 
@@ -2125,6 +2548,11 @@
         label: oldTemplate ? (labels[templateId] || oldTemplate.label) : "New template: " + (labels[templateId] || templateId),
         lines: lines.length ? lines : ["No changes"]
       });
+    });
+
+    (payload.removeTemplates || []).forEach(function (id) {
+      if (!templates[id]) return;
+      changes.push({ type: "template", templateId: id, isRemoval: true, label: "Remove: " + templates[id].label, lines: ["− Removed from your workouts (logged history is kept)"] });
     });
 
     var labelFor = function (id) {
@@ -2175,6 +2603,9 @@
       next.weekPlan[Number(dayKey)] = payload.weekPlan[dayKey];
     });
     if (payload.restDays) next.restDays = payload.restDays.slice();
+    (payload.removeTemplates || []).forEach(function (id) {
+      if (next.templates[id] && !next.templates[id].isCardio) delete next.templates[id];
+    });
     return next;
   }
 
@@ -2373,6 +2804,12 @@
     setTemplateFocus: setTemplateFocus,
     formatExerciseTarget: formatExerciseTarget,
     buildSharePlanPayload: buildSharePlanPayload,
+    EXERCISE_TRAITS: EXERCISE_TRAITS,
+    AVOID_AREAS: AVOID_AREAS,
+    HEALTH_FLAGS: HEALTH_FLAGS,
+    normalizeAnswers: normalizeAnswers,
+    tailorPlan: tailorPlan,
+    recommendPresets: recommendPresets,
     encodeSharePlan: encodeSharePlan,
     decodeSharePlan: decodeSharePlan,
     extractShareToken: extractShareToken,
@@ -2742,6 +3179,10 @@
       render();
       // Ask for protected storage once there's real data worth keeping.
       checkStorage(state.sessions.length > 0);
+      if (!state.onboarded) {
+        if (L.extractShareToken(location.hash)) { state.onboarded = true; Store.save(state); }
+        else startOnboarding("first");
+      }
       openSharedPlanFromUrl();
     });
     window.addEventListener("hashchange", openSharedPlanFromUrl);
@@ -3436,7 +3877,16 @@
       case "picker-chip": toggleCatInFilter(pickerFilter, el.dataset.cat); return renderPickerChipsAndList();
       case "picker-pick": return pickFromBank(el.dataset.exercise);
       case "picker-create": return openBankForm("new", pickerFilter.query.trim(), true);
-      case "load-starter-plan": return loadStarterPlan(el.dataset.plan);
+      case "open-find-plan": return startOnboarding("again");
+      case "onb-next": onb.step += 1; return renderOnbStep();
+      case "onb-back": onb.step -= 1; return renderOnbStep();
+      case "onb-back-to-plans": onbPlanPending = false; onb.step = 4; return renderOnbStep();
+      case "onb-skip": return onbGoToFinish();
+      case "onb-choice": return onbChoice(el);
+      case "onb-pick-plan": return onbPickPlan(el.dataset.plan);
+      case "onb-protect": return checkStorage(true).then(function () { if (onb && onb.step === 5) renderOnbStep(); });
+      case "onb-backup": onb = null; closeModal(); return gotoBackupSettings();
+      case "onb-done": onb = null; closeModal(); return render();
       case "open-share-plan": return openSharePlanModal();
       case "share-plan-native": return sharePlanNative();
       case "copy-share-link": return copyShareLink();
@@ -4528,10 +4978,7 @@
       '<textarea class="plan-import" id="planImportText" placeholder="Paste the AI’s response here…"></textarea>' +
       '<div style="height:10px"></div>' +
       '<button class="btn primary block" data-action="preview-plan-changes">Preview Changes</button>' +
-      '<div class="field-label" style="margin-top:14px;">Or start from a built-in plan</div>' +
-      L.STARTER_PLANS.map(function (p) {
-        return '<button class="btn ghost block" style="margin-top:6px;text-align:left;" data-action="load-starter-plan" data-plan="' + p.id + '"><strong>' + esc(p.label) + '</strong><div class="faint" style="font-weight:400;margin-top:2px;">' + esc(p.description) + "</div></button>";
-      }).join("") +
+      '<button class="btn ghost block" style="margin-top:8px;" data-action="open-find-plan">Or Find a Plan…</button>' +
       '<div id="planImportPreview" style="margin-top:12px;"></div>';
     openModal(body);
   }
@@ -4620,8 +5067,8 @@
   var storageStatus = { supported: !!(navigator.storage && navigator.storage.persisted), persisted: null, asked: false, usage: null };
 
   function checkStorage(requestIfNeeded) {
-    if (!storageStatus.supported) { renderStorageLine(); return; }
-    navigator.storage.persisted().then(function (persisted) {
+    if (!storageStatus.supported) { renderStorageLine(); return Promise.resolve(); }
+    return navigator.storage.persisted().then(function (persisted) {
       if (persisted || !requestIfNeeded) return persisted;
       storageStatus.asked = true;
       return navigator.storage.persist();
@@ -4656,13 +5103,199 @@
     }
   }
 
-  // Fills the paste box with a built-in plan and previews it -- same
-  // review-then-Apply step as a pasted plan, nothing applies on its own.
-  function loadStarterPlan(id) {
-    var plan = L.STARTER_PLANS.filter(function (p) { return p.id === id; })[0];
-    if (!plan) return;
-    $("#planImportText").value = JSON.stringify({ planChanges: plan.planChanges }, null, 2);
+  /* ---------- first-run intro + "Find a Plan" ----------
+     mode "first": shown once on a brand-new install (state.onboarded is
+     false). mode "again": Settings → Find a Plan, starting at the
+     questions with the saved answers. Either way a chosen preset is
+     tailored to the answers (TrainLogic.tailorPlan) and handed to the
+     normal Import Plan Changes preview -- nothing applies until Apply. */
+  var onb = null;          // { mode, step, answers }
+  var onbPlanPending = false;
+
+  var ONB_GOALS = [{ value: "muscle", label: "Build muscle" }, { value: "fitness", label: "General fitness" }, { value: "endurance", label: "Endurance" }, { value: "fatloss", label: "Lose weight" }];
+  var ONB_DAYS = [{ value: 3, label: "3 days" }, { value: 4, label: "4 days" }, { value: 5, label: "5 days" }];
+  var ONB_MINUTES = [{ value: 20, label: "~20 min" }, { value: 30, label: "~30 min" }, { value: 45, label: "45+ min" }];
+  var ONB_EQUIPMENT = [{ value: "dumbbells", label: "Dumbbells" }, { value: "bar", label: "Pull-up bar" }, { value: "bike", label: "Bike" }, { value: "rope", label: "Jump rope" }];
+  var ONB_EXPERIENCE = [{ value: "new", label: "New to this" }, { value: "returning", label: "Getting back into it" }, { value: "regular", label: "Training regularly" }];
+  var ONB_HEALTH = [{ value: "pregnant", label: "Pregnant or postpartum" }, { value: "injury", label: "Recovering from injury or surgery" }, { value: "condition", label: "Heart, blood pressure or other medical condition" }, { value: "pain", label: "Pain when exercising" }];
+  var ONB_AVOID = [{ value: "knees", label: "Knees" }, { value: "shoulders", label: "Shoulders" }, { value: "lowerBack", label: "Lower back" }, { value: "wrists", label: "Wrists" }];
+
+  function startOnboarding(mode) {
+    var saved = state.profile || {};
+    onb = {
+      mode: mode,
+      step: mode === "first" ? 0 : 1,
+      answers: {
+        goal: saved.goal || "fitness", days: saved.days || 3, minutes: saved.minutes || 30,
+        equipment: (saved.equipment || []).slice(), experience: saved.experience || "returning",
+        health: (saved.health || []).slice(), avoid: (saved.avoid || []).slice(),
+        weights: (state.ownedWeights || []).join(", ")
+      }
+    };
+    renderOnbStep();
+  }
+
+  function onbChoices(field, options, multi) {
+    var current = onb.answers[field];
+    return '<div class="cat-chips">' + options.map(function (o) {
+      var on = multi ? current.indexOf(o.value) !== -1 : current === o.value;
+      return '<button class="' + (on ? "on" : "") + '" data-action="onb-choice" data-field="' + field + '" data-value="' + o.value + '"' + (multi ? ' data-multi="1"' : "") + ">" + esc(o.label) + "</button>";
+    }).join("") + "</div>";
+  }
+
+  function onbHead(title, stepLabel) {
+    return '<div class="modal-grip"></div>' +
+      '<div class="modal-head"><h2>' + esc(title) + '</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
+      (stepLabel ? '<div class="eyebrow" style="margin:-8px 0 12px;">' + esc(stepLabel) + "</div>" : "");
+  }
+
+  function onbNav(nextLabel) {
+    return '<div class="row" style="gap:8px;margin-top:16px;">' +
+      (onb.step > (onb.mode === "first" ? 0 : 1) ? '<button class="btn ghost" style="flex:1;" data-action="onb-back">Back</button>' : "") +
+      '<button class="btn primary" style="flex:2;" data-action="onb-next">' + esc(nextLabel || "Next") + "</button></div>";
+  }
+
+  function renderOnbStep() {
+    var a = onb.answers;
+    var body;
+    if (onb.step === 0) {
+      body = '<div class="modal-grip"></div>' +
+        '<div style="text-align:center;padding:10px 4px 6px;">' +
+        '<div class="onb-wordmark">TRAIN</div>' +
+        '<div class="muted" style="margin:10px auto 20px;max-width:34ch;">Plans your week, logs every set, and tells you when to go heavier. Everything stays on this phone.</div>' +
+        "</div>" +
+        '<button class="btn primary block" data-action="onb-next">Find Me a Plan</button>' +
+        '<div style="height:8px"></div>' +
+        '<button class="btn ghost block" data-action="onb-skip">I’ll Set It Up Myself</button>' +
+        '<div class="faint" style="font-size:12px;text-align:center;margin-top:12px;">A few quick questions, about a minute.</div>';
+    } else if (onb.step === 1) {
+      body = onbHead("Your goals", "Step 1 of 3") +
+        '<label class="field-label">Main goal</label>' + onbChoices("goal", ONB_GOALS) +
+        '<label class="field-label">Days per week</label>' + onbChoices("days", ONB_DAYS) +
+        '<label class="field-label">Time per session</label>' + onbChoices("minutes", ONB_MINUTES) +
+        onbNav();
+    } else if (onb.step === 2) {
+      body = onbHead("Your setup", "Step 2 of 3") +
+        '<label class="field-label">Equipment you have (tap all that apply)</label>' + onbChoices("equipment", ONB_EQUIPMENT, true) +
+        (a.equipment.indexOf("dumbbells") !== -1 ?
+          '<label class="field-label">Dumbbell weights you own, in lb (optional)</label>' +
+          '<input type="text" id="onbWeights" inputmode="decimal" placeholder="e.g. 10, 15, 20, 25" value="' + esc(a.weights || "") + '">' +
+          '<div class="faint" style="font-size:12px;margin:4px 0 10px;">Lets suggestions jump to weights you actually have.</div>'
+          : '<div class="faint" style="font-size:12px;margin:-4px 0 10px;">None of these? Leave them all off — there’s a no-equipment plan.</div>') +
+        '<label class="field-label">Experience</label>' + onbChoices("experience", ONB_EXPERIENCE) +
+        onbNav();
+    } else if (onb.step === 3) {
+      var careful = a.health.length > 0;
+      body = onbHead("Anything to work around?", "Step 3 of 3") +
+        '<label class="field-label">Any of these apply? (optional)</label>' + onbChoices("health", ONB_HEALTH, true) +
+        (careful ? '<div class="banner" style="margin-top:4px;">Please check with your doctor, midwife or physio before starting — they can tell you what’s right for you. TRAIN will leave out jumping and point you toward gentler plans. This is general fitness guidance, not medical advice.' +
+          (a.health.indexOf("pregnant") !== -1 ? "<br><br>Pregnant or postpartum: TRAIN will also leave out exercises done lying on your back and crunch-style ab work. Your provider can tell you what to add back, and when." : "") +
+          "</div>" : "") +
+        '<label class="field-label">Go easy on (optional)</label>' + onbChoices("avoid", ONB_AVOID, true) +
+        '<div class="faint" style="font-size:12px;margin-top:-4px;">Exercises that load these areas get swapped for alternatives.</div>' +
+        onbNav("See Plans");
+    } else if (onb.step === 4) {
+      var recs = L.recommendPresets(a);
+      body = onbHead("Plans for you") +
+        '<div class="muted" style="margin-bottom:12px;">Best match first. Each is adjusted to your answers — you’ll see exactly what’s in it before anything changes.</div>' +
+        recs.map(function (r, i) {
+          var p = r.preset;
+          return '<div class="preset-card' + (i === 0 ? " best" : "") + '">' +
+            '<div class="row" style="align-items:flex-start;"><div class="preset-title">' + esc(p.label) + "</div>" +
+            (i === 0 ? '<span class="pill hold" style="flex-shrink:0;">Best match</span>' : "") + "</div>" +
+            '<div class="preset-meta">' + p.days + " days/week · ~" + p.minutes + " min · " + esc(p.level) + "</div>" +
+            '<div class="muted" style="font-size:12px;margin:6px 0 10px;">' + esc(p.description) + "</div>" +
+            '<div class="row"><span class="faint" style="font-size:12px;">' + (r.swaps ? r.swaps + " exercise" + (r.swaps === 1 ? "" : "s") + " adjusted for you" : "No adjustments needed") + "</span>" +
+            '<button class="btn sm' + (i === 0 ? " primary" : "") + '" data-action="onb-pick-plan" data-plan="' + p.id + '">Preview</button></div>' +
+            "</div>";
+        }).join("") +
+        '<div class="row" style="margin-top:6px;"><button class="btn ghost" data-action="onb-back">Back</button></div>';
+    } else {
+      var installed = window.matchMedia && window.matchMedia("(display-mode: standalone)").matches;
+      body = onbHead("You’re set") +
+        '<div class="muted" style="margin-bottom:12px;">Three things that keep your progress safe:</div>' +
+        (installed ? "" : '<div class="plan-diff-block"><div class="diff-title">Install TRAIN</div><div class="diff-line">Chrome: ⋮ menu → Add to Home screen. iPhone Safari: Share → Add to Home Screen. It then opens like an app, and its storage is safer.</div></div>') +
+        '<div class="plan-diff-block"><div class="diff-title">Protect storage</div><div class="diff-line" id="onbStorage">' + onbStorageText() + '</div>' +
+        (storageStatus.supported && !storageStatus.persisted ? '<button class="btn ghost sm" style="margin-top:8px;" data-action="onb-protect">Protect Storage</button>' : "") + "</div>" +
+        '<div class="plan-diff-block"><div class="diff-title">Back up</div><div class="diff-line">Your data lives only on this phone. Settings → Data can export a backup, or keep one updated automatically on Chrome.</div>' +
+        '<button class="btn ghost sm" style="margin-top:8px;" data-action="onb-backup">Set Up Backup</button></div>' +
+        '<button class="btn primary block" style="margin-top:10px;" data-action="onb-done">Start Training</button>';
+    }
+    openModal(body);
+    var weights = $("#onbWeights");
+    if (weights) weights.addEventListener("input", function () { onb.answers.weights = weights.value; });
+  }
+
+  function onbStorageText() {
+    if (!storageStatus.supported) return "Not available in this browser — keep backups current.";
+    if (storageStatus.persisted) return "Protected — the browser won’t clear TRAIN’s data to free up space.";
+    return storageStatus.asked ? "The browser declined for now — installing TRAIN usually changes that." : "Ask the browser not to clear TRAIN’s data when the phone is low on space.";
+  }
+
+  function onbChoice(el) {
+    var field = el.dataset.field;
+    var raw = el.dataset.value;
+    var value = (field === "days" || field === "minutes") ? Number(raw) : raw;
+    if (el.dataset.multi) {
+      var list = onb.answers[field];
+      var i = list.indexOf(value);
+      if (i === -1) list.push(value); else list.splice(i, 1);
+    } else {
+      onb.answers[field] = value;
+    }
+    renderOnbStep();
+  }
+
+  // Saves the answers (and any dumbbell weights) and marks the intro done.
+  function onbSaveAnswers() {
+    var a = onb.answers;
+    state.profile = L.normalizeAnswers(a);
+    var weights = String(a.weights || "").split(",").map(function (x) { return Number(x.trim()); }).filter(function (n) { return !isNaN(n) && n > 0; });
+    if (weights.length) state.ownedWeights = weights.filter(function (n, i) { return weights.indexOf(n) === i; }).sort(function (x, y) { return x - y; });
+    state.onboarded = true;
+    Store.save(state);
+  }
+
+  function onbGoToFinish() {
+    state.onboarded = true;
+    Store.save(state);
+    onb.step = 5;
+    renderOnbStep();
+  }
+
+  function onbPickPlan(id) {
+    var preset = L.STARTER_PLANS.filter(function (p) { return p.id === id; })[0];
+    if (!preset) return;
+    var tailored = L.tailorPlan(preset.planChanges, onb.answers);
+    var planChanges = tailored.planChanges;
+    // A brand-new install still has the untouched default workouts; clear
+    // the ones this plan doesn't use so the library starts clean. Someone
+    // using Find a Plan later keeps all their existing workouts.
+    if (onb.mode === "first" && !state.sessions.length) {
+      var templates = L.getTemplates(state);
+      planChanges.removeTemplates = L.getTemplateIds(state).filter(function (tid) { return !templates[tid].isCardio && !planChanges.templates[tid]; });
+    }
+    onbPlanPending = true;
+    openPlanImportModal();
+    $("#planImportText").value = JSON.stringify({ planChanges: planChanges }, null, 2);
     previewPlanChanges();
+    var notes = tailored.swaps.map(function (s) {
+      return "<li>" + esc(s.from) + (s.to ? " → " + esc(s.to) : " — left out") + ' <span class="faint">(' + esc(s.reason) + ")</span></li>";
+    }).join("");
+    $("#planImportPreview").insertAdjacentHTML("afterbegin",
+      '<div class="banner"><strong>' + esc(preset.label) + "</strong>, adjusted for you" +
+      (notes ? ':<ul style="margin:6px 0 0;padding-left:18px;">' + notes + "</ul>" : " — no changes needed.") +
+      (tailored.trimmed ? '<div style="margin-top:6px;">Trimmed ' + tailored.trimmed + " exercise" + (tailored.trimmed === 1 ? "" : "s") + " to fit your session length.</div>" : "") +
+      '<button class="btn ghost sm" style="margin-top:8px;" data-action="onb-back-to-plans">← Back to Plans</button></div>');
+  }
+
+  // Called after a plan from the intro is applied.
+  function onbAfterApply() {
+    onbPlanPending = false;
+    if (!onb) return;
+    onbSaveAnswers();
+    if (onb.mode === "first") { onb.step = 5; renderOnbStep(); }
+    else onb = null;
   }
 
   function previewPlanChanges() {
@@ -4710,6 +5343,7 @@
     Store.save(state);
     closeModal();
     render();
+    if (onbPlanPending) onbAfterApply();
   }
 
   /* ---------- exercise history (progress trend) ---------- */
