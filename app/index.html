@@ -40,7 +40,7 @@
     --bg:#080B12;--s1:#0E1118;--s2:#141720;--s3:#1C2030;
     --b1:#1E2235;--b2:#272B40;--b3:#343850;
     --text:#DDE1F0;--muted:#8087A2;--dim:#3A3F5C;
-    --accent:#F0A030;--blue:#4D8EF5;--green:#3DBF7A;--red:#E05060;--purple:#9B6FF5;--teal:#26C9D3;
+    --accent:#F0A030;--accent-fill:var(--accent);--blue:#4D8EF5;--green:#3DBF7A;--red:#E05060;--purple:#9B6FF5;--teal:#26C9D3;
     --font:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
     --display:"Barlow","Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
     --r:6px;--r2:10px;--shadow:0 2px 12px rgba(0,0,0,.4);
@@ -50,7 +50,13 @@
     --bg:#F0F2F8;--s1:#FFFFFF;--s2:#F5F6FA;--s3:#ECEEF5;
     --b1:#DDE0EC;--b2:#C8CCE0;--b3:#B0B5D0;
     --text:#1A1D2E;--muted:#5A5F7C;--dim:#C0C4D8;
-    --accent:#B4700F;--shadow:0 2px 12px rgba(0,0,0,.1);
+    /* --accent stays a darkened amber -- it's used as foreground text and
+       chart strokes on near-white surfaces, which need that much contrast
+       to stay legible. --accent-fill is the undarkened, dark-theme amber:
+       solid button/toggle backgrounds only ever sit next to black text,
+       so they can afford to be this much brighter, and look muddy if they
+       aren't. */
+    --accent:#B4700F;--accent-fill:#F0A030;--shadow:0 2px 12px rgba(0,0,0,.1);
   }
   [data-theme="olive"]{
     --bg:#0B0F0A;--s1:#12160F;--s2:#171C13;--s3:#1F251A;
@@ -86,6 +92,17 @@
     --text-dim:var(--muted);
     --text-faint:color-mix(in srgb,var(--muted) 62%,var(--dim));
     --accent-text:#000;
+    /* --accent-fill (declared up in the base :root, alongside --accent):
+       the accent used for solid button/chip backgrounds, always paired
+       with --accent-text, so it only has to read against black text, not
+       against the page. --accent itself doubles as foreground text/stroke
+       color on the page, which on a near-white surface has to be darkened
+       for contrast -- fill defaults to the same value as accent, and only
+       light mode overrides it (see its block above) to the punchier,
+       undarkened amber. It must default in the FIRST :root block, not
+       here: this block and [data-theme="light"] have equal specificity,
+       so whichever comes later in the file would win the cascade, and
+       redeclaring it here would silently clobber light mode's override. */
     --accent-soft:color-mix(in srgb,var(--accent) 14%,transparent);
     --accent-soft-border:color-mix(in srgb,var(--accent) 40%,transparent);
     --done:var(--green);
@@ -148,7 +165,7 @@
   nav.tabbar button{
     background:none;border:none;color:var(--text-faint);
     display:flex;flex-direction:column;align-items:center;gap:4px;
-    font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+    font-size:11px;font-weight:600;
     padding:6px 10px;min-width:64px;border-radius:var(--radius-sm);
   }
   nav.tabbar button svg{width:21px;height:21px;stroke:var(--text-faint);fill:none;stroke-width:1.8;}
@@ -188,19 +205,22 @@
   .pill.recovery{color:var(--red);background:var(--red-soft);}
   .pill.rest{color:var(--text-dim);background:var(--neutral-soft);}
 
-  /* Span buttons: uppercase, letter-spaced; one primary per screen. */
+  /* One primary button per screen; text stays in the case it's written
+     in (sentence/title case) rather than Span's default all-caps -- the
+     panel section labels (.panel h2) carry that brand signature instead,
+     so it isn't lost, just not repeated on every tap target. */
   button.btn{
     background:transparent;color:var(--text);border:1px solid var(--border-strong);
     border-radius:var(--radius-sm);padding:11px 14px;min-height:44px;
-    font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+    font-size:14px;font-weight:600;
     transition:opacity .15s;
   }
   button.btn:active{opacity:.7;}
-  button.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text);font-weight:700;}
+  button.btn.primary{background:var(--accent-fill);border-color:var(--accent-fill);color:var(--accent-text);font-weight:700;}
   button.btn.danger{background:transparent;border-color:var(--border-strong);color:var(--red);}
   button.btn.ghost{background:transparent;border-color:var(--border-strong);color:var(--text-dim);}
   button.btn.block{width:100%;}
-  button.btn.sm{padding:7px 11px;min-height:34px;font-size:11px;}
+  button.btn.sm{padding:7px 11px;min-height:34px;font-size:12.5px;}
   button.btn:disabled{opacity:.3;}
   button.icon-btn{background:none;border:none;color:var(--text-dim);min-height:34px;min-width:34px;font-size:16px;}
 
@@ -267,9 +287,17 @@
   }
   .update-banner.show{display:flex;}
   .update-banner .actions{display:flex;align-items:center;gap:6px;flex-shrink:0;}
-  .update-banner button{background:rgba(0,0,0,.14);color:inherit;border:none;border-radius:var(--radius-sm);padding:6px 12px;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;}
+  .update-banner button{background:rgba(0,0,0,.14);color:inherit;border:none;border-radius:var(--radius-sm);padding:6px 12px;font-size:12px;font-weight:700;}
   .update-banner button.dismiss{background:none;padding:6px;font-size:15px;line-height:1;opacity:.85;}
-  .backup-banner{background:var(--accent);color:#000;}
+  /* Backup nudge: a real thing to act on, but not urgent the way an app
+     update is -- a quiet card-surface strip with an accent dot, not the
+     full-bleed solid-accent treatment above, so it doesn't outshout the
+     screen's actual primary button. */
+  .backup-banner{background:var(--chrome);color:var(--text);border-bottom:1px solid var(--accent-soft-border);box-shadow:var(--shadow-md);}
+  .backup-banner #backupBannerText{display:inline-flex;align-items:center;gap:8px;}
+  .backup-banner #backupBannerText::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--accent);flex-shrink:0;}
+  .backup-banner .actions button:not(.dismiss){background:var(--accent-soft);color:var(--accent);}
+  .backup-banner .dismiss{color:var(--text-faint);}
 
   /* Span modal: dimmed backdrop, s2 surface, b2 edge -- kept as a bottom
      sheet here, which is the phone-native shape for it. */
@@ -292,11 +320,11 @@
   .empty{text-align:center;color:var(--text-faint);font-size:13px;padding:26px 10px;}
   .weekday-toggle{display:flex;gap:6px;flex-wrap:wrap;}
   .weekday-toggle button{width:42px;height:42px;border-radius:var(--radius-sm);border:1px solid var(--border-strong);background:transparent;color:var(--text-dim);font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;}
-  .weekday-toggle button.on{color:var(--accent-text);background:var(--accent);border-color:var(--accent);}
+  .weekday-toggle button.on{color:var(--accent-text);background:var(--accent-fill);border-color:var(--accent-fill);}
   /* Span's pill switch buttons (.sbtn) */
   .cat-chips{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0 10px;}
   .cat-chips button{padding:7px 13px;min-height:34px;border-radius:20px;border:1px solid var(--border-strong);background:transparent;color:var(--text-dim);font-size:12px;font-weight:600;letter-spacing:.04em;}
-  .cat-chips button.on{color:var(--accent-text);background:var(--accent);border-color:var(--accent);}
+  .cat-chips button.on{color:var(--accent-text);background:var(--accent-fill);border-color:var(--accent-fill);}
   .cat-chips .swatch{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle;}
   .cat-chips button.on .swatch{box-shadow:0 0 0 1.5px rgba(0,0,0,.55);}
   .bank-list{max-height:320px;overflow-y:auto;}
@@ -354,13 +382,6 @@
   .delta.up{color:var(--green);background:var(--done-soft);}
   .delta.down{color:var(--red);background:var(--red-soft);}
   .delta.flat{color:var(--text-dim);background:var(--neutral-soft);}
-
-  .level-block{display:flex;align-items:center;gap:14px;margin-bottom:16px;}
-  .level-badge{width:56px;height:56px;border-radius:50%;background:var(--accent-soft);border:1px solid var(--accent-soft-border);display:flex;align-items:center;justify-content:center;flex-direction:column;flex:0 0 auto;}
-  .level-badge .num{font-family:var(--display);font-size:24px;font-weight:800;color:var(--accent);line-height:1;font-variant-numeric:tabular-nums;}
-  .level-badge .lbl{font-size:8px;text-transform:uppercase;letter-spacing:.12em;color:var(--accent);font-weight:700;}
-  .level-bar{height:6px;border-radius:3px;background:var(--b1);overflow:hidden;margin-top:6px;}
-  .level-bar-fill{height:100%;background:var(--accent);}
 
   .streak-block{display:flex;align-items:center;gap:10px;padding:12px;border-radius:var(--radius-sm);background:var(--s1);border:1px solid var(--border);margin-bottom:16px;}
   .streak-num{font-family:var(--display);font-size:30px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums;}
@@ -452,9 +473,6 @@
       <svg viewBox="0 0 24 24"><path d="M12 2C9 6 6 9 6 13a6 6 0 0 0 12 0c0-2-1-3.5-2-5 .3 2-1 3-1 3 .3-3-1-6-3-9z"/></svg>
       <span id="streakNum">0</span>
     </button>
-    <button class="chip-btn" id="lvlChip" data-action="goto-progress">
-      <span id="lvlNum">Lvl 1</span>
-    </button>
   </div>
 </header>
 
@@ -478,14 +496,6 @@
   <!-- ===== PROGRESS ===== -->
   <section class="view" id="view-progress">
     <div class="panel">
-      <h2>Level</h2>
-      <div class="level-block">
-        <div class="level-badge"><div class="num" id="progLvlNum">1</div><div class="lbl">LVL</div></div>
-        <div style="flex:1;">
-          <div class="row"><span class="muted" id="progXpLabel">0 XP</span><span class="muted" id="progXpNext"></span></div>
-          <div class="level-bar"><div class="level-bar-fill" id="progLvlBar" style="width:0%"></div></div>
-        </div>
-      </div>
       <div class="streak-block">
         <div>
           <div class="streak-num" id="progStreakNum">0</div>
@@ -2781,14 +2791,11 @@
     var verdictCounts = { PUSH: 0, STEADY: 0, HOLD: 0, RECOVERY: 0 };
     readinessEntries.forEach(function (r) { if (verdictCounts.hasOwnProperty(r.verdict)) verdictCounts[r.verdict]++; });
 
-    var lvl = levelForXp(state.xp || 0);
-
     var lines = [];
     lines.push("# TRAIN check-in digest");
     lines.push("Generated " + toDateKey(now));
     lines.push("");
     lines.push("## Snapshot");
-    lines.push("- Level " + lvl.level + " (" + (state.xp || 0) + " total XP)");
     lines.push("- Current streak: " + streak.current + " days (longest: " + streak.longest + ")");
     lines.push("- Strength: " + attrs.strength.score + "/99 — " + attrs.strength.detail);
     lines.push("- Endurance: " + attrs.endurance.score + "/99 — " + attrs.endurance.detail);
@@ -3495,9 +3502,6 @@
 
   /* ---------- top bar chips ---------- */
   function renderTopChips() {
-    var lvl = L.levelForXp(state.xp);
-    $("#lvlNum").textContent = "Lvl " + lvl.level;
-
     var streak = L.computeStreakInfo(state, new Date());
     var chip = $("#streakChip");
     $("#streakNum").textContent = streak.current;
@@ -3663,7 +3667,7 @@
       el.innerHTML = restWarning +
         '<div class="panel">' +
         '<h2 class="headline">Rest Day <span class="tag">' + (vm.swapped ? "Swapped" : "Scheduled") + '</span></h2>' +
-        '<div class="muted" style="margin-bottom:10px;">Recovery day. Garmin already has your steps/walks — log optional bike, jump rope, or other cardio here if you did any.</div>' +
+        '<div class="muted" style="margin-bottom:10px;">Recovery day. If your steps and walks already sync from a tracker, no need to log those here — just optional bike, jump rope, or other cardio if you did any.</div>' +
         '<button class="btn ghost block" data-action="toggle-rest-cardio">' + (cardioLogged ? "Edit Cardio Log" : "+ Add Cardio") + '</button>' +
         '<div id="restCardioSlot" style="margin-top:10px;display:' + (cardioLogged ? "block" : "none") + ';"></div>' +
         '<div style="margin-top:10px;"><button class="btn ghost sm" data-action="open-swap">Swap this day</button> ' +
@@ -3688,7 +3692,7 @@
       el.innerHTML = restWarning + recoveryBanner +
         '<div class="panel">' +
         '<h2 class="headline">' + esc(vm.template.label) + '<span class="tag">' + esc(dateTag) + '</span></h2>' +
-        '<div class="muted" style="margin-bottom:10px;">Structured cardio. Pick a type and log duration/effort — runs & walks already come in through Garmin.</div>' +
+        '<div class="muted" style="margin-bottom:10px;">Structured cardio. Pick a type and log duration/effort — skip runs and walks here if those already sync in from a tracker.</div>' +
         '<div id="cardioFormSlot"></div>' +
         '<div style="margin-top:10px;"><button class="btn ghost sm" data-action="open-swap">Swap this day</button> ' +
         '<button class="btn ghost sm" data-action="open-custom-exercise">+ Custom Exercise</button></div>' +
@@ -3800,12 +3804,6 @@
 
   /* ---------- PROGRESS view ---------- */
   function renderProgress() {
-    var lvl = L.levelForXp(state.xp);
-    $("#progLvlNum").textContent = lvl.level;
-    $("#progXpLabel").textContent = state.xp + " XP total";
-    $("#progXpNext").textContent = lvl.xpIntoLevel + " / " + lvl.xpForNext + " to next";
-    $("#progLvlBar").style.width = lvl.pct + "%";
-
     var streak = L.computeStreakInfo(state, new Date());
     $("#progStreakNum").textContent = streak.current;
     $("#progStreakNum").classList.toggle("active", streak.current > 0);
@@ -3916,6 +3914,17 @@
     }).join("");
   }
 
+  // "Thu, Sep 25" -- same short-date style as the week-nav header, plus
+  // a weekday so a scrolling log of dates reads at a glance. Falls back
+  // to the raw key if the date string is ever unparseable.
+  function friendlyLogDate(dateKey) {
+    var d = new Date(dateKey + "T00:00:00");
+    if (isNaN(d.getTime())) return dateKey;
+    var opts = { weekday: "short", month: "short", day: "numeric" };
+    if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+    return d.toLocaleDateString(undefined, opts);
+  }
+
   function renderSessionLog() {
     var el = $("#historyList");
     var sessions = state.sessions.slice().sort(function (a, b) { return b.date.localeCompare(a.date); });
@@ -3926,7 +3935,7 @@
       var parts = [];
       if (exCount) parts.push(exCount + " exercises, " + setCount + " sets");
       if (s.cardio) parts.push(s.cardio.cardioType + " " + s.cardio.durationMin + "min");
-      return '<div class="history-item"><div class="row1"><span>' + esc(s.dayLabel || s.date) + '</span><span>' + esc(s.date) + '</span></div>' +
+      return '<div class="history-item"><div class="row1"><span>' + esc(s.dayLabel || "Workout") + '</span><span>' + esc(friendlyLogDate(s.date)) + '</span></div>' +
         '<div class="row2">' + esc(parts.join(" · ") || "no data") + " · +" + (s.xpEarned || 0) + " XP</div></div>";
     }).join("");
   }
