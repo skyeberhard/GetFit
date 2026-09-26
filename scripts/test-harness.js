@@ -1003,6 +1003,57 @@ function main() {
   check("updateExerciseInTemplate patches only the targeted field", patched.exercises[0].targetSets === 6 && patched.exercises[0].name === originalTemplate.exercises[0].name);
   check("updateExerciseInTemplate does not mutate the source template", originalTemplate.exercises[0].targetSets === 4);
 
+  /* ---- exercise bank ---- */
+  const freshBank = L.freshState().exerciseBank;
+  check("a fresh account's bank includes the built-in exercises", !!freshBank["Burpee"] && freshBank["Burpee"].category === "Conditioning");
+  check("a fresh account's bank includes every default-template exercise", L.getTemplateIds(L.freshState()).every((id) => (L.WORKOUT_TEMPLATES[id].exercises || []).every((e) => !!freshBank[e.name])));
+  check("every built-in bank entry has one of the five categories", L.DEFAULT_EXERCISE_BANK.every((e) => L.EXERCISE_CATEGORIES.indexOf(e.category) !== -1));
+
+  const seededState = L.freshState();
+  seededState.exerciseBank = undefined;
+  seededState.exercises = { "Sled Push": { name: "Sled Push", metric: "reps", loaded: true, lastSetCount: 4, lastReps: 8 } };
+  const seeded = L.seedExerciseBank(seededState);
+  check("seedExerciseBank pulls in logged-only exercises, uncategorized", seeded["Sled Push"] && seeded["Sled Push"].category === null && seeded["Sled Push"].targetSets === 4);
+
+  const kept = L.addMissingToBank({ "Push-Up": { name: "Push-Up", category: "Push", metric: "reps", loaded: true, targetSets: 5, targetReps: 25 } }, [{ name: "Push-Up", targetSets: 1, targetReps: 1 }]);
+  check("addMissingToBank never overwrites an existing entry", kept["Push-Up"].targetSets === 5);
+  const withBuiltinCat = L.addMissingToBank({}, [{ name: "Goblet Squat", metric: "reps", loaded: true, targetSets: 2, targetReps: 8 }]);
+  check("addMissingToBank takes the category from the built-in list, defaults from the def", withBuiltinCat["Goblet Squat"].category === "Legs" && withBuiltinCat["Goblet Squat"].targetSets === 2);
+
+  const legsCore = L.filterExerciseBank(freshBank, "", ["Legs", "Core"]);
+  check("filterExerciseBank narrows by category", legsCore.length > 0 && legsCore.every((e) => e.category === "Legs" || e.category === "Core"));
+  check("filterExerciseBank sorts by category order then name", legsCore[0].category === "Legs");
+  check("filterExerciseBank matches a search query case-insensitively", L.filterExerciseBank(freshBank, "PLANK", []).map((e) => e.name).indexOf("Side Plank") !== -1);
+
+  const templateDef = L.bankEntryToTemplateDef(freshBank["Goblet Squat"]);
+  check("bankEntryToTemplateDef copies defaults (not category) into a workout exercise", templateDef.targetRepsMax === 20 && templateDef.category === undefined);
+
+  check("upsertBankEntry rejects an entry with no name", L.upsertBankEntry(freshBank, { name: "  " }) === null);
+  const upserted = L.upsertBankEntry(freshBank, { name: "Farmer Carry", category: "Conditioning", metric: "seconds", loaded: true, targetSets: 3, targetReps: 40 });
+  check("upsertBankEntry adds a new entry without mutating the source bank", upserted.bank["Farmer Carry"].category === "Conditioning" && !freshBank["Farmer Carry"]);
+  check("upsertBankEntry drops an unknown category to uncategorized", L.upsertBankEntry(freshBank, { name: "X", category: "Arms", targetSets: 3, targetReps: 10 }).entry.category === null);
+  check("removeBankEntry removes without mutating", !L.removeBankEntry(freshBank, "Burpee")["Burpee"] && !!freshBank["Burpee"]);
+  check("setTemplateFocus keeps only valid, unique categories", L.setTemplateFocus({ exercises: [] }, ["Legs", "Arms", "Legs", "Core"]).focus.join(",") === "Legs,Core");
+
+  const v6Blob = Object.assign({}, L.freshState(), { schemaVersion: 6, exerciseBank: undefined });
+  v6Blob.templates = L.cloneTemplates(L.WORKOUT_TEMPLATES);
+  v6Blob.templates.upperA.exercises.push({ name: "Band Pull-Apart", metric: "reps", loaded: false, targetSets: 3, targetReps: 20 });
+  const fromV6 = L.migrate(v6Blob);
+  check("v6->v7 migration seeds the bank, including custom template exercises", fromV6.schemaVersion === L.SCHEMA_VERSION && !!fromV6.exerciseBank["Band Pull-Apart"] && !!fromV6.exerciseBank["Burpee"]);
+
+  /* ---- starter plan through the real import path ---- */
+  const starter = L.STARTER_PLANS[0];
+  const starterState = L.freshState();
+  starterState.exerciseBank = L.removeBankEntry(starterState.exerciseBank, "Jump Rope");
+  const parsedStarter = L.parsePlanChangePayload(JSON.stringify({ planChanges: starter.planChanges }), starterState);
+  check("the built-in starter plan parses cleanly with no errors", parsedStarter.valid && parsedStarter.errors.length === 0);
+  check("plan import carries a template's focus", parsedStarter.payload.focus.lower.join(",") === "Legs,Core");
+  check("diffPlanChanges shows a focus change", L.diffPlanChanges(starterState, parsedStarter.payload).some((d) => d.templateId === "lower" && d.lines.some((l) => l.indexOf("Focus:") === 0)));
+  const appliedStarter = L.applyPlanChanges(starterState, parsedStarter.payload);
+  check("applying the starter plan creates Explosive Power with its focus", appliedStarter.templates.explosive.label === "Explosive Power" && appliedStarter.templates.explosive.focus.join(",") === "Conditioning,Core");
+  check("applying a plan adds its exercises back into the bank", !!appliedStarter.exerciseBank["Jump Rope"] && appliedStarter.exerciseBank["Jump Rope"].category === "Conditioning");
+  check("applying the starter plan sets Wed/Sun rest days", appliedStarter.restDays.join(",") === "0,3");
+
   /* ---- daysBetween (backup reminder) ---- */
   check("daysBetween is null for no timestamp", L.daysBetween(null, new Date("2026-09-25T00:00:00.000Z")) === null);
   check("daysBetween is null for an unparseable timestamp", L.daysBetween("not a date", new Date("2026-09-25T00:00:00.000Z")) === null);

@@ -227,6 +227,10 @@
   .weekday-toggle{display:flex;gap:6px;flex-wrap:wrap;}
   .weekday-toggle button{width:42px;height:42px;border-radius:var(--radius-sm);border:1px solid var(--border-strong);background:var(--bg);color:var(--text-dim);font-size:11px;font-weight:600;}
   .weekday-toggle button.on{color:var(--accent-text);background:var(--accent);border-color:var(--accent);}
+  .cat-chips{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0 10px;}
+  .cat-chips button{padding:6px 12px;border-radius:999px;border:1px solid var(--border-strong);background:var(--bg);color:var(--text-dim);font-size:12px;font-weight:600;}
+  .cat-chips button.on{color:var(--accent-text);background:var(--accent);border-color:var(--accent);}
+  .bank-list{max-height:320px;overflow-y:auto;}
 
   .history-item{border-bottom:1px solid var(--border);padding:11px 0;}
   .history-item:last-child{border-bottom:none;}
@@ -393,6 +397,15 @@
     </div>
 
     <div class="panel">
+      <h2>Exercise Bank</h2>
+      <div class="muted" style="margin-bottom:10px;">Every exercise you can pick when building a workout, with its default sets and reps. Picking one copies these defaults into the workout — editing an exercise here later doesn't change workouts that already use it.</div>
+      <input type="text" id="bankSearch" placeholder="Search exercises" autocomplete="off">
+      <div class="cat-chips" id="bankChips"></div>
+      <div class="bank-list" id="bankList"></div>
+      <button class="btn ghost sm" data-action="bank-new" style="margin-top:8px;">+ New Exercise</button>
+    </div>
+
+    <div class="panel">
       <h2>Readiness Baselines</h2>
       <label class="muted" style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
         <input type="checkbox" id="baselinesAutoToggle"> Auto-calculate from my check-in history (last 30 days)
@@ -487,7 +500,7 @@
 (function (root) {
   "use strict";
 
-  var SCHEMA_VERSION = 6;
+  var SCHEMA_VERSION = 7;
 
   var WEEKDAY_LABELS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 
@@ -1308,6 +1321,10 @@
       state = migrateV5ToV6(state);
       version = 6;
     }
+    if (version === 6) {
+      state = migrateV6ToV7(state);
+      version = 7;
+    }
     state.schemaVersion = SCHEMA_VERSION;
     return state;
   }
@@ -1439,6 +1456,14 @@
     return next;
   }
 
+  // Adds `exerciseBank`, seeded from the built-in list plus every exercise
+  // already in this account's workouts and history (see seedExerciseBank).
+  function migrateV6ToV7(state) {
+    var next = Object.assign({}, state);
+    next.exerciseBank = seedExerciseBank(next);
+    return next;
+  }
+
   function cloneTemplates(templates) {
     return JSON.parse(JSON.stringify(templates));
   }
@@ -1472,6 +1497,7 @@
     state.ownedWeights = [];
     state.deloadWeeks = {};
     state.baselinesAuto = true;
+    state.exerciseBank = seedExerciseBank(state);
     return state;
   }
 
@@ -1500,6 +1526,187 @@
     t.exercises[index] = Object.assign({}, t.exercises[index], patch);
     return t;
   }
+
+  /* ---------- exercise bank ----------
+     A library of exercise definitions (category + default sets/reps) to
+     pick from when building a workout. Picking COPIES the defaults into
+     the workout -- editing a bank entry later deliberately doesn't reach
+     into workouts that already use it, so tuning Friday's push-ups can't
+     silently change Monday's. Keyed by name, same as the progress catalog
+     (state.exercises), so an exercise's history lines up with its bank
+     entry. */
+  var EXERCISE_CATEGORIES = ["Push", "Pull", "Legs", "Core", "Conditioning"];
+
+  function bankDef(name, category, metric, loaded, targetSets, targetReps, targetRepsMax) {
+    var def = { name: name, category: category, metric: metric, loaded: loaded, targetSets: targetSets, targetReps: targetReps };
+    if (targetRepsMax) def.targetRepsMax = targetRepsMax;
+    return def;
+  }
+
+  var DEFAULT_EXERCISE_BANK = [
+    bankDef("Push-Up", "Push", "reps", true, 4, 15, 20),
+    bankDef("Clapping Push-Up", "Push", "reps", false, 4, 8),
+    bankDef("Pike Push-Up", "Push", "reps", false, 3, 8),
+    bankDef("Tricep Dip", "Push", "reps", true, 3, 10, 12),
+    bankDef("Dumbbell Press", "Push", "reps", true, 3, 10, 14),
+    bankDef("Dumbbell Shoulder Press", "Push", "reps", true, 3, 8, 12),
+    bankDef("Lateral Raise", "Push", "reps", true, 3, 12, 15),
+    bankDef("Overhead Tricep Extension", "Push", "reps", true, 3, 10, 14),
+    bankDef("Pull-Up", "Pull", "reps", true, 4, 8, 10),
+    bankDef("Chin-Up", "Pull", "reps", true, 3, 6, 10),
+    bankDef("Dumbbell Row", "Pull", "reps", true, 3, 10, 14),
+    bankDef("Reverse Fly", "Pull", "reps", true, 3, 12, 15),
+    bankDef("Dumbbell Curl", "Pull", "reps", true, 3, 10, 14),
+    bankDef("Hammer Curl", "Pull", "reps", true, 3, 10, 14),
+    bankDef("Goblet Squat", "Legs", "reps", true, 4, 12, 20),
+    bankDef("Reverse Lunge", "Legs", "reps", true, 3, 10, 12),
+    bankDef("Bulgarian Split Squat", "Legs", "reps", true, 3, 8, 12),
+    bankDef("Dumbbell RDL", "Legs", "reps", true, 3, 10, 14),
+    bankDef("Glute Bridge", "Legs", "reps", false, 3, 15),
+    bankDef("Calf Raise", "Legs", "reps", true, 4, 15, 25),
+    bankDef("Plank", "Core", "seconds", false, 3, 60),
+    bankDef("Side Plank", "Core", "seconds", false, 3, 30),
+    bankDef("Hollow Hold", "Core", "seconds", false, 3, 30),
+    bankDef("Dead Bug", "Core", "reps", false, 3, 10),
+    bankDef("Hanging Leg Raise", "Core", "reps", false, 3, 12),
+    bankDef("Hanging Knee Tuck", "Core", "reps", false, 3, 15),
+    bankDef("Bicycle Crunch", "Core", "reps", false, 3, 20),
+    bankDef("Russian Twist", "Core", "reps", true, 3, 20),
+    bankDef("Jump Squat", "Conditioning", "reps", false, 4, 12),
+    bankDef("Burpee", "Conditioning", "reps", false, 3, 10),
+    bankDef("Jump Rope", "Conditioning", "seconds", false, 5, 60),
+    bankDef("Mountain Climber", "Conditioning", "seconds", false, 3, 30),
+    bankDef("Bear Crawl", "Conditioning", "seconds", false, 3, 30),
+    bankDef("High Knees", "Conditioning", "seconds", false, 3, 30)
+  ];
+  var BUILTIN_BANK_BY_NAME = {};
+  DEFAULT_EXERCISE_BANK.forEach(function (e) { BUILTIN_BANK_BY_NAME[e.name] = e; });
+
+  function sanitizeBankEntry(raw) {
+    var def = sanitizeExerciseDef(raw);
+    if (!def) return null;
+    def.category = raw && EXERCISE_CATEGORIES.indexOf(raw.category) !== -1 ? raw.category : null;
+    return def;
+  }
+
+  // Adds any exercise in `defs` the bank doesn't have yet (never
+  // overwrites an existing entry). A name the built-in list knows gets its
+  // category from there; anything else starts uncategorized until you tag it.
+  function addMissingToBank(bank, defs) {
+    var next = Object.assign({}, bank || {});
+    (defs || []).forEach(function (d) {
+      if (!d || !d.name || next[d.name]) return;
+      var builtin = BUILTIN_BANK_BY_NAME[d.name];
+      var entry = sanitizeBankEntry(Object.assign({}, d, { category: d.category || (builtin ? builtin.category : null) }));
+      if (entry) next[entry.name] = entry;
+    });
+    return next;
+  }
+
+  // The initial bank for an account: the built-in list, then every
+  // exercise in its workouts, then anything it has ever logged -- so
+  // nothing already in use is missing from the picker on day one.
+  function seedExerciseBank(state) {
+    var bank = addMissingToBank((state && state.exerciseBank) || {}, DEFAULT_EXERCISE_BANK);
+    var templates = getTemplates(state);
+    Object.keys(templates).forEach(function (id) { bank = addMissingToBank(bank, templates[id].exercises || []); });
+    var catalog = (state && state.exercises) || {};
+    bank = addMissingToBank(bank, Object.keys(catalog).map(function (name) {
+      var c = catalog[name];
+      return { name: name, metric: c.metric, loaded: c.loaded !== false, targetSets: c.lastSetCount || 3, targetReps: c.lastReps || 10 };
+    }));
+    return bank;
+  }
+
+  function categoryRank(category) {
+    var i = EXERCISE_CATEGORIES.indexOf(category);
+    return i === -1 ? EXERCISE_CATEGORIES.length : i;
+  }
+
+  // No categories selected = everything, including uncategorized entries.
+  function filterExerciseBank(bank, query, categories) {
+    var q = String(query || "").trim().toLowerCase();
+    var cats = categories || [];
+    return Object.keys(bank || {}).map(function (k) { return bank[k]; }).filter(function (e) {
+      if (q && e.name.toLowerCase().indexOf(q) === -1) return false;
+      if (cats.length && cats.indexOf(e.category) === -1) return false;
+      return true;
+    }).sort(function (a, b) {
+      return (categoryRank(a.category) - categoryRank(b.category)) || a.name.localeCompare(b.name);
+    });
+  }
+
+  function bankEntryToTemplateDef(entry) {
+    var def = { name: entry.name, metric: entry.metric, loaded: entry.loaded, targetSets: entry.targetSets, targetReps: entry.targetReps };
+    if (entry.targetRepsMax) def.targetRepsMax = entry.targetRepsMax;
+    return def;
+  }
+
+  function upsertBankEntry(bank, raw) {
+    var entry = sanitizeBankEntry(raw);
+    if (!entry) return null;
+    var next = Object.assign({}, bank || {});
+    next[entry.name] = entry;
+    return { bank: next, entry: entry };
+  }
+
+  function removeBankEntry(bank, name) {
+    var next = Object.assign({}, bank || {});
+    delete next[name];
+    return next;
+  }
+
+  // A workout's focus pre-selects the picker's category filter (a Legs day
+  // opens on Legs + Core) -- it only narrows what's shown first, never
+  // what's allowed.
+  function setTemplateFocus(template, categories) {
+    var t = JSON.parse(JSON.stringify(template));
+    t.focus = (categories || []).filter(function (c, i, arr) { return EXERCISE_CATEGORIES.indexOf(c) !== -1 && arr.indexOf(c) === i; });
+    return t;
+  }
+
+  /* ---------- starter plans (ship with the app, applied via the same
+     preview-then-apply path as a pasted plan-change import) ---------- */
+  var STARTER_PLANS = [{
+    id: "reacher-hybrid",
+    label: "Reacher Hybrid",
+    description: "Upper push/pull, legs & core, explosive power, full-body dumbbell, a weekly run — rest Wed/Sun, core in every strength day.",
+    planChanges: {
+      templates: {
+        upperA: { label: "Upper Body — Push/Pull", focus: ["Push", "Pull", "Core"], exercises: [
+          bankDef("Push-Up", null, "reps", true, 4, 15, 20),
+          bankDef("Pull-Up", null, "reps", true, 4, 8, 10),
+          bankDef("Tricep Dip", null, "reps", true, 3, 10, 12),
+          bankDef("Dumbbell Row", null, "reps", true, 3, 10, 14),
+          bankDef("Hanging Leg Raise", null, "reps", false, 3, 12)
+        ] },
+        lower: { label: "Legs & Core", focus: ["Legs", "Core"], exercises: [
+          bankDef("Goblet Squat", null, "reps", true, 4, 12, 20),
+          bankDef("Reverse Lunge", null, "reps", true, 3, 10, 12),
+          bankDef("Dumbbell RDL", null, "reps", true, 3, 10, 14),
+          bankDef("Calf Raise", null, "reps", true, 4, 15, 25),
+          bankDef("Plank", null, "seconds", false, 3, 60)
+        ] },
+        explosive: { label: "Explosive Power", focus: ["Conditioning", "Core"], exercises: [
+          bankDef("Jump Squat", null, "reps", false, 4, 12),
+          bankDef("Burpee", null, "reps", false, 3, 10),
+          bankDef("Clapping Push-Up", null, "reps", false, 4, 8),
+          bankDef("Hanging Knee Tuck", null, "reps", false, 3, 15),
+          bankDef("Jump Rope", null, "seconds", false, 5, 60)
+        ] },
+        upperB: { label: "Full Body — Dumbbell", focus: ["Push", "Pull", "Legs", "Core"], exercises: [
+          bankDef("Dumbbell Shoulder Press", null, "reps", true, 3, 8, 12),
+          bankDef("Pull-Up", null, "reps", true, 3, 8, 10),
+          bankDef("Dumbbell RDL", null, "reps", true, 3, 10, 14),
+          bankDef("Dumbbell Curl", null, "reps", true, 3, 10, 14),
+          bankDef("Russian Twist", null, "reps", true, 3, 20),
+          bankDef("Side Plank", null, "seconds", false, 3, 30)
+        ] }
+      },
+      weekPlan: { "0": "cardio", "1": "upperA", "2": "lower", "3": "cardio", "4": "explosive", "5": "upperB", "6": "cardio" },
+      restDays: [0, 3]
+    }
+  }];
 
   /* ---------- plan-change import: parse / diff / apply a proposed patch ----
      Expected shape (fenced ```json``` or bare JSON, from an AI's digest
@@ -1566,6 +1773,7 @@
     var existingTemplates = state ? getTemplates(state) : WORKOUT_TEMPLATES;
     var templates = {};
     var labels = {};
+    var focus = {};
     var weekPlan = {};
     var restDays = null;
 
@@ -1598,6 +1806,7 @@
         }
         templates[templateId] = cleaned;
         if (label) labels[templateId] = label;
+        if (Array.isArray(entry.focus)) focus[templateId] = setTemplateFocus({}, entry.focus).focus;
       });
     }
 
@@ -1637,7 +1846,7 @@
     return {
       valid: hasAnything,
       errors: errors,
-      payload: hasAnything ? { templates: templates, labels: labels, weekPlan: weekPlan, restDays: restDays } : null
+      payload: hasAnything ? { templates: templates, labels: labels, focus: focus, weekPlan: weekPlan, restDays: restDays } : null
     };
   }
 
@@ -1658,6 +1867,11 @@
       var lines = [];
       if (oldTemplate && labels[templateId] && labels[templateId] !== oldTemplate.label) {
         lines.push("Renamed: " + oldTemplate.label + " → " + labels[templateId]);
+      }
+      var newFocus = (payload.focus || {})[templateId];
+      var oldFocus = (oldTemplate && oldTemplate.focus) || [];
+      if (newFocus && newFocus.join(",") !== oldFocus.join(",")) {
+        lines.push("Focus: " + (oldFocus.length ? oldFocus.join(", ") : "none") + " → " + (newFocus.length ? newFocus.join(", ") : "none"));
       }
       newExercises.forEach(function (ne) {
         var oe = oldByName[ne.name];
@@ -1714,7 +1928,9 @@
       var oldTemplate = next.templates[templateId] || { id: templateId };
       var patch = { exercises: payload.templates[templateId] };
       if (labels[templateId]) patch.label = labels[templateId];
+      if ((payload.focus || {})[templateId]) patch.focus = payload.focus[templateId];
       next.templates[templateId] = Object.assign({}, oldTemplate, patch);
+      next.exerciseBank = addMissingToBank(next.exerciseBank || state.exerciseBank, payload.templates[templateId]);
     });
     next.weekPlan = Object.assign({}, state.weekPlan);
     Object.keys(payload.weekPlan || {}).forEach(function (dayKey) {
@@ -1907,6 +2123,17 @@
     DEFAULT_WEEK_PLAN: DEFAULT_WEEK_PLAN,
     CARDIO_TYPES: CARDIO_TYPES,
     getTemplateIds: getTemplateIds,
+    EXERCISE_CATEGORIES: EXERCISE_CATEGORIES,
+    DEFAULT_EXERCISE_BANK: DEFAULT_EXERCISE_BANK,
+    STARTER_PLANS: STARTER_PLANS,
+    seedExerciseBank: seedExerciseBank,
+    addMissingToBank: addMissingToBank,
+    filterExerciseBank: filterExerciseBank,
+    bankEntryToTemplateDef: bankEntryToTemplateDef,
+    upsertBankEntry: upsertBankEntry,
+    removeBankEntry: removeBankEntry,
+    setTemplateFocus: setTemplateFocus,
+    formatExerciseTarget: formatExerciseTarget,
     addTemplate: addTemplate,
     removeTemplateFromMap: removeTemplateFromMap,
     templateWeekdaysInUse: templateWeekdaysInUse,
@@ -2896,6 +3123,11 @@
     $("#baselinesAutoToggle").addEventListener("change", function (e) {
       toggleBaselinesAuto(e.target.checked);
     });
+
+    $("#bankSearch").addEventListener("input", function (e) {
+      bankFilter.query = e.target.value;
+      renderBankList();
+    });
   }
 
   function switchView(name) {
@@ -2947,6 +3179,17 @@
       case "add-template": return openAddTemplateModal();
       case "confirm-add-template": return confirmAddTemplate();
       case "delete-template": return deleteTemplateFlow();
+      case "template-focus": return toggleTemplateFocus(el.dataset.cat);
+      case "bank-chip": toggleCatInFilter(bankFilter, el.dataset.cat); return renderBankPanel();
+      case "bank-new": return openBankForm("new", "", false);
+      case "bank-edit": return openBankForm("edit", el.dataset.exercise, false);
+      case "bank-form-cat": bankForm.category = el.dataset.cat; return renderBankFormChips();
+      case "bank-save": return saveBankForm();
+      case "bank-delete": return deleteBankEntryFlow();
+      case "picker-chip": toggleCatInFilter(pickerFilter, el.dataset.cat); return renderPickerChipsAndList();
+      case "picker-pick": return pickFromBank(el.dataset.exercise);
+      case "picker-create": return openBankForm("new", pickerFilter.query.trim(), true);
+      case "load-starter-plan": return loadStarterPlan(el.dataset.plan);
       case "open-plan-import": return openPlanImportModal();
       case "preview-plan-changes": return previewPlanChanges();
       case "apply-plan-changes": return applyPlanChangesConfirmed();
@@ -3414,13 +3657,20 @@
     input.addEventListener("input", function () {
       var q = input.value.trim().toLowerCase();
       if (!q) { list.innerHTML = ""; return; }
-      var names = Object.keys(state.exercises)
+      // The bank plus anything logged that isn't in it (e.g. removed from
+      // the bank but still has history).
+      var pool = Object.keys(state.exerciseBank || {});
+      Object.keys(state.exercises).forEach(function (n) { if (pool.indexOf(n) === -1) pool.push(n); });
+      var names = pool
         .filter(function (n) { return n.toLowerCase().indexOf(q) !== -1; })
+        .sort()
         .slice(0, 6);
       if (!names.length) { list.innerHTML = ""; return; }
       list.innerHTML = names.map(function (name) {
         var entry = state.exercises[name];
-        var meta = entry.loaded
+        var bankEntry = (state.exerciseBank || {})[name];
+        var meta = !entry ? L.formatExerciseTarget(bankEntry)
+          : entry.loaded
           ? (entry.lastWeight || 0) + " lb last time"
           : (entry.lastReps || 0) + (entry.metric === "seconds" ? " sec" : " reps") + " last time";
         return '<div class="suggestion-item" data-action="pick-custom-suggestion" data-exercise="' + esc(name) + '">' +
@@ -3432,9 +3682,14 @@
   function pickCustomSuggestion(el) {
     var name = el.dataset.exercise;
     var entry = state.exercises[name];
+    var bankEntry = (state.exerciseBank || {})[name];
     $("#customName").value = name;
     $("#customSuggestions").innerHTML = "";
-    if (entry) {
+    if (!entry && bankEntry) {
+      setFselectValue("customMetric", bankEntry.metric, METRIC_OPTIONS);
+      $("#customLoaded").checked = bankEntry.loaded;
+      $("#customSets").value = bankEntry.targetSets;
+    } else if (entry) {
       setFselectValue("customMetric", entry.metric || "reps", METRIC_OPTIONS);
       $("#customLoaded").checked = entry.loaded !== undefined ? entry.loaded : true;
       if (entry.lastSetCount) $("#customSets").value = entry.lastSetCount;
@@ -3456,6 +3711,9 @@
       for (var i = 0; i < numSets; i++) sets.push({ reps: null, weight: null, cadenceMs: null });
       session.exercises.push({ name: name, isCustom: true, metric: metric, loaded: loaded, sets: sets });
     }
+    // A brand-new one-off lands in the bank too (uncategorized unless the
+    // built-in list knows it) so it can be picked for a workout later.
+    state.exerciseBank = L.addMissingToBank(state.exerciseBank, [{ name: name, metric: metric, loaded: loaded, targetSets: numSets, targetReps: 10 }]);
     Store.save(state);
     closeModal();
     render();
@@ -3477,6 +3735,7 @@
     renderWeekPlanEditor();
     renderTemplatePicker();
     renderTemplateEditor();
+    renderBankPanel();
     renderBaselinesPanel();
 
     $("#ownedWeights").value = (state.ownedWeights || []).join(", ");
@@ -3591,9 +3850,12 @@
     var editableIds = L.getTemplateIds(state).filter(function (id) { return !templates[id].isCardio; });
     if (editableIds.indexOf(planEditorTemplateId) === -1) planEditorTemplateId = editableIds[0];
     var options = editableIds.map(function (id) { return { value: id, label: templates[id].label }; });
+    var focus = (templates[planEditorTemplateId] && templates[planEditorTemplateId].focus) || [];
     el.innerHTML = renderFselect("templatePicker", options, planEditorTemplateId) +
       '<button class="btn ghost sm" data-action="add-template" style="margin-top:8px;">+ New Workout Template</button>' +
-      (editableIds.length > 1 ? '<button class="btn ghost sm" data-action="delete-template" style="margin-top:8px;margin-left:6px;">Delete This Template</button>' : "");
+      (editableIds.length > 1 ? '<button class="btn ghost sm" data-action="delete-template" style="margin-top:8px;margin-left:6px;">Delete This Template</button>' : "") +
+      '<div class="field-label" style="margin-top:12px;">Focus — which categories "+ Add Exercise" opens on</div>' +
+      '<div class="cat-chips">' + renderCatChips(focus, "template-focus", false) + "</div>";
     wireFselect("templatePicker", options, function (value) {
       planEditorTemplateId = value;
       renderTemplateEditor();
@@ -3664,9 +3926,200 @@
   }
 
   function planAddExercise() {
-    updatePlanTemplate(function (t) {
-      return L.addExerciseToTemplate(t, { name: "New Exercise", metric: "reps", loaded: true, targetSets: 3, targetReps: 10 });
+    openExercisePicker();
+  }
+
+  /* ---------- exercise bank + picker ---------- */
+  var bankFilter = { query: "", cats: [] };
+  var pickerFilter = { query: "", cats: [] };
+  // What the bank form modal is editing: mode "new"|"edit", plus whether a
+  // newly created entry should also land in the workout being edited.
+  var bankForm = null;
+
+  function renderCatChips(selected, action, includeUncategorized) {
+    var cats = L.EXERCISE_CATEGORIES.slice();
+    if (includeUncategorized) cats.push("Uncategorized");
+    return '<button class="' + (selected.length ? "" : "on") + '" data-action="' + action + '" data-cat="">All</button>' +
+      cats.map(function (c) {
+        return '<button class="' + (selected.indexOf(c) !== -1 ? "on" : "") + '" data-action="' + action + '" data-cat="' + c + '">' + c + "</button>";
+      }).join("");
+  }
+
+  function toggleCatInFilter(filter, cat) {
+    if (!cat) { filter.cats = []; return; }
+    var i = filter.cats.indexOf(cat);
+    if (i === -1) filter.cats.push(cat); else filter.cats.splice(i, 1);
+  }
+
+  // "Uncategorized" is a filter-only pseudo-category for entries with no
+  // category yet (e.g. an exercise first logged as a one-off custom).
+  function filterBank(filter, excludeNames) {
+    var realCats = filter.cats.filter(function (c) { return c !== "Uncategorized"; });
+    var wantUncat = filter.cats.indexOf("Uncategorized") !== -1;
+    var all = L.filterExerciseBank(state.exerciseBank, filter.query, []);
+    return all.filter(function (e) {
+      if (excludeNames && excludeNames.indexOf(e.name) !== -1) return false;
+      if (!filter.cats.length) return true;
+      return (e.category && realCats.indexOf(e.category) !== -1) || (!e.category && wantUncat);
     });
+  }
+
+  function bankRowHtml(entry, action) {
+    return '<div class="suggestion-item" data-action="' + action + '" data-exercise="' + esc(entry.name) + '">' +
+      "<span>" + esc(entry.name) + '</span><span class="faint">' + esc(L.formatExerciseTarget(entry) + (entry.loaded ? "" : ", bodyweight") + " · " + (entry.category || "Uncategorized")) + "</span></div>";
+  }
+
+  function hasUncategorized() {
+    var bank = state.exerciseBank || {};
+    return Object.keys(bank).some(function (k) { return !bank[k].category; });
+  }
+
+  function renderBankPanel() {
+    var chips = $("#bankChips");
+    if (!chips) return;
+    chips.innerHTML = renderCatChips(bankFilter.cats, "bank-chip", hasUncategorized());
+    renderBankList();
+  }
+
+  function renderBankList() {
+    var list = $("#bankList");
+    var rows = filterBank(bankFilter);
+    list.innerHTML = rows.length ? rows.map(function (e) { return bankRowHtml(e, "bank-edit"); }).join("")
+      : '<div class="empty">No exercises match.</div>';
+  }
+
+  function openExercisePicker() {
+    var template = L.getTemplates(state)[planEditorTemplateId];
+    if (!template) return;
+    pickerFilter = { query: "", cats: (template.focus || []).slice() };
+    var body =
+      '<div class="modal-grip"></div>' +
+      '<div class="modal-head"><h2>Add to ' + esc(template.label) + '</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
+      '<input type="text" id="pickerSearch" placeholder="Search the exercise bank" autocomplete="off">' +
+      '<div class="cat-chips" id="pickerChips"></div>' +
+      '<div class="bank-list" id="pickerList"></div>';
+    openModal(body);
+    $("#pickerSearch").addEventListener("input", function (e) {
+      pickerFilter.query = e.target.value;
+      renderPickerList();
+    });
+    renderPickerChipsAndList();
+  }
+
+  function renderPickerChipsAndList() {
+    $("#pickerChips").innerHTML = renderCatChips(pickerFilter.cats, "picker-chip", hasUncategorized());
+    renderPickerList();
+  }
+
+  function renderPickerList() {
+    var template = L.getTemplates(state)[planEditorTemplateId];
+    var inWorkout = (template.exercises || []).map(function (e) { return e.name; });
+    var rows = filterBank(pickerFilter, inWorkout);
+    var q = pickerFilter.query.trim();
+    var exact = q && Object.keys(state.exerciseBank || {}).some(function (n) { return n.toLowerCase() === q.toLowerCase(); });
+    var html = rows.map(function (e) { return bankRowHtml(e, "picker-pick"); }).join("");
+    if (q && !exact) {
+      html += '<div class="suggestion-item" data-action="picker-create"><span>+ Create “' + esc(q) + '”</span><span class="faint">new exercise</span></div>';
+    }
+    if (!html) html = '<div class="empty">' + (pickerFilter.cats.length ? "Nothing left in these categories — tap All, or search to create one." : "Every exercise in the bank is already in this workout.") + "</div>";
+    $("#pickerList").innerHTML = html;
+  }
+
+  function pickFromBank(name) {
+    var entry = (state.exerciseBank || {})[name];
+    if (!entry) return;
+    updatePlanTemplate(function (t) { return L.addExerciseToTemplate(t, L.bankEntryToTemplateDef(entry)); });
+    closeModal();
+  }
+
+  function openBankForm(mode, name, addToWorkout) {
+    var entry = mode === "edit" ? state.exerciseBank[name] : null;
+    var builtin = null;
+    L.DEFAULT_EXERCISE_BANK.forEach(function (b) { if (!entry && b.name.toLowerCase() === String(name || "").toLowerCase()) builtin = b; });
+    var base = entry || builtin || { name: name || "", category: null, metric: "reps", loaded: true, targetSets: 3, targetReps: 10 };
+    bankForm = { mode: mode, name: base.name, category: base.category || null, addToWorkout: !!addToWorkout };
+    var body =
+      '<div class="modal-grip"></div>' +
+      '<div class="modal-head"><h2>' + (mode === "edit" ? esc(base.name) : "New Exercise") + '</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
+      (mode === "edit" ? "" : '<label class="field-label">Name</label><input type="text" id="bankName" autocomplete="off" value="' + esc(base.name) + '">') +
+      '<label class="field-label" style="margin-top:8px;">Category</label>' +
+      '<div class="cat-chips" id="bankFormChips"></div>' +
+      '<div class="grid3">' +
+      '<div><label class="field-label">Sets</label><input type="number" id="bankSets" value="' + base.targetSets + '"></div>' +
+      '<div><label class="field-label">Target</label><input type="number" id="bankReps" value="' + base.targetReps + '"></div>' +
+      '<div><label class="field-label">Unit</label>' + renderFselect("bankMetric", METRIC_OPTIONS, base.metric) + "</div>" +
+      "</div>" +
+      '<div style="margin-top:8px;"><label class="field-label">Max reps (weighted only — top of rep range before adding weight; blank = target+4)</label>' +
+      '<input type="number" id="bankRepsMax" value="' + (base.targetRepsMax || "") + '"></div>' +
+      '<label class="muted" style="display:flex;align-items:center;gap:8px;margin-top:8px;"><input type="checkbox" id="bankLoaded"' + (base.loaded ? " checked" : "") + "> Weighted</label>" +
+      '<div id="bankFormError"></div>' +
+      '<div style="height:10px"></div>' +
+      '<button class="btn primary block" data-action="bank-save">' + (addToWorkout ? "Save & Add to Workout" : "Save") + "</button>" +
+      (mode === "edit" ? '<button class="btn ghost block" style="margin-top:8px;" data-action="bank-delete">Remove from Bank</button>' : "");
+    openModal(body);
+    renderBankFormChips();
+    wireFselect("bankMetric", METRIC_OPTIONS, function () {});
+  }
+
+  function renderBankFormChips() {
+    $("#bankFormChips").innerHTML = L.EXERCISE_CATEGORIES.map(function (c) {
+      return '<button class="' + (bankForm.category === c ? "on" : "") + '" data-action="bank-form-cat" data-cat="' + c + '">' + c + "</button>";
+    }).join("");
+  }
+
+  function saveBankForm() {
+    var name = bankForm.mode === "edit" ? bankForm.name : $("#bankName").value.trim();
+    var errorEl = $("#bankFormError");
+    var showError = function (msg) { errorEl.innerHTML = '<div class="banner danger" style="margin-top:10px;">' + esc(msg) + "</div>"; };
+    if (!name) return showError("Give the exercise a name.");
+    if (!bankForm.category) return showError("Pick a category.");
+    if (bankForm.mode === "new" && Object.keys(state.exerciseBank || {}).some(function (n) { return n.toLowerCase() === name.toLowerCase(); })) {
+      return showError("“" + name + "” is already in the bank.");
+    }
+    var result = L.upsertBankEntry(state.exerciseBank, {
+      name: name,
+      category: bankForm.category,
+      metric: fselectValue("bankMetric") === "seconds" ? "seconds" : "reps",
+      loaded: $("#bankLoaded").checked,
+      targetSets: Number($("#bankSets").value),
+      targetReps: Number($("#bankReps").value),
+      targetRepsMax: Number($("#bankRepsMax").value) || undefined
+    });
+    if (!result) return showError("Check the fields and try again.");
+    state.exerciseBank = result.bank;
+    if (bankForm.addToWorkout) {
+      state.templates[planEditorTemplateId] = L.addExerciseToTemplate(state.templates[planEditorTemplateId], L.bankEntryToTemplateDef(result.entry));
+    }
+    bankForm = null;
+    closeModal();
+    Store.save(state);
+    renderTemplateEditor();
+    renderBankPanel();
+  }
+
+  // Removing a bank entry only takes it out of the picker -- workouts that
+  // already include it keep their copy, and its logged history is untouched.
+  function deleteBankEntryFlow() {
+    var name = bankForm && bankForm.name;
+    if (!name) return;
+    if (!confirm("Remove “" + name + "” from the exercise bank? Workouts that already include it keep it, and its history stays.")) return;
+    state.exerciseBank = L.removeBankEntry(state.exerciseBank, name);
+    bankForm = null;
+    closeModal();
+    Store.save(state);
+    renderBankPanel();
+  }
+
+  function toggleTemplateFocus(cat) {
+    var template = state.templates[planEditorTemplateId];
+    if (!template) return;
+    var current = (template.focus || []).slice();
+    if (!cat) current = [];
+    else if (current.indexOf(cat) === -1) current.push(cat);
+    else current.splice(current.indexOf(cat), 1);
+    state.templates[planEditorTemplateId] = L.setTemplateFocus(template, current);
+    Store.save(state);
+    renderTemplatePicker();
   }
 
   function planRemoveExercise(el) {
@@ -3794,8 +4247,21 @@
       '<textarea class="plan-import" id="planImportText" placeholder="Paste the AI’s response here…"></textarea>' +
       '<div style="height:10px"></div>' +
       '<button class="btn primary block" data-action="preview-plan-changes">Preview Changes</button>' +
+      '<div class="field-label" style="margin-top:14px;">Or start from a built-in plan</div>' +
+      L.STARTER_PLANS.map(function (p) {
+        return '<button class="btn ghost block" style="margin-top:6px;text-align:left;" data-action="load-starter-plan" data-plan="' + p.id + '"><strong>' + esc(p.label) + '</strong><div class="faint" style="font-weight:400;margin-top:2px;">' + esc(p.description) + "</div></button>";
+      }).join("") +
       '<div id="planImportPreview" style="margin-top:12px;"></div>';
     openModal(body);
+  }
+
+  // Fills the paste box with a built-in plan and previews it -- same
+  // review-then-Apply step as a pasted plan, nothing applies on its own.
+  function loadStarterPlan(id) {
+    var plan = L.STARTER_PLANS.filter(function (p) { return p.id === id; })[0];
+    if (!plan) return;
+    $("#planImportText").value = JSON.stringify({ planChanges: plan.planChanges }, null, 2);
+    previewPlanChanges();
   }
 
   function previewPlanChanges() {
