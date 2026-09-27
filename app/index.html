@@ -259,6 +259,7 @@
   .exercise-card.complete{border-color:var(--done-soft-border);background:var(--done-soft);}
   .exercise-card h3{font-size:16px;margin-bottom:2px;font-weight:700;letter-spacing:.01em;}
   .exercise-card .target{font-size:12px;color:var(--text-dim);margin-bottom:12px;}
+  .exercise-card .desc{font-size:12px;color:var(--text-faint);line-height:1.4;margin:-8px 0 12px;}
   .set-row{display:grid;grid-template-columns:26px 1fr 1fr 40px 34px;gap:6px;align-items:center;margin-bottom:6px;}
   .set-row .set-idx{font-family:var(--display);font-size:13px;color:var(--text-faint);text-align:center;font-weight:700;}
   .set-row input{text-align:center;padding:8px 4px;font-size:15px;font-variant-numeric:tabular-nums;}
@@ -1775,64 +1776,65 @@
      entry. */
   var EXERCISE_CATEGORIES = ["Push", "Pull", "Legs", "Core", "Conditioning"];
 
-  function bankDef(name, category, metric, loaded, targetSets, targetReps, targetRepsMax) {
+  function bankDef(name, category, metric, loaded, targetSets, targetReps, targetRepsMax, description) {
     var def = { name: name, category: category, metric: metric, loaded: loaded, targetSets: targetSets, targetReps: targetReps };
     if (targetRepsMax) def.targetRepsMax = targetRepsMax;
+    if (description) def.description = description;
     return def;
   }
 
   var DEFAULT_EXERCISE_BANK = [
-    bankDef("Push-Up", "Push", "reps", true, 4, 15, 20),
-    bankDef("Clapping Push-Up", "Push", "reps", false, 4, 8),
-    bankDef("Pike Push-Up", "Push", "reps", false, 3, 8),
-    bankDef("Tricep Dip", "Push", "reps", true, 3, 10, 12),
-    bankDef("Dumbbell Press", "Push", "reps", true, 3, 10, 14),
-    bankDef("Dumbbell Shoulder Press", "Push", "reps", true, 3, 8, 12),
-    bankDef("Lateral Raise", "Push", "reps", true, 3, 12, 15),
-    bankDef("Overhead Tricep Extension", "Push", "reps", true, 3, 10, 14),
-    bankDef("Pull-Up", "Pull", "reps", true, 4, 8, 10),
-    bankDef("Chin-Up", "Pull", "reps", true, 3, 6, 10),
-    bankDef("Dumbbell Row", "Pull", "reps", true, 3, 10, 14),
-    bankDef("Reverse Fly", "Pull", "reps", true, 3, 12, 15),
-    bankDef("Dumbbell Curl", "Pull", "reps", true, 3, 10, 14),
-    bankDef("Hammer Curl", "Pull", "reps", true, 3, 10, 14),
-    bankDef("Goblet Squat", "Legs", "reps", true, 4, 12, 20),
-    bankDef("Reverse Lunge", "Legs", "reps", true, 3, 10, 12),
-    bankDef("Bulgarian Split Squat", "Legs", "reps", true, 3, 8, 12),
-    bankDef("Dumbbell RDL", "Legs", "reps", true, 3, 10, 14),
-    bankDef("Glute Bridge", "Legs", "reps", false, 3, 15),
-    bankDef("Calf Raise", "Legs", "reps", true, 4, 15, 25),
-    bankDef("Plank", "Core", "seconds", false, 3, 60),
-    bankDef("Side Plank", "Core", "seconds", false, 3, 30),
-    bankDef("Hollow Hold", "Core", "seconds", false, 3, 30),
-    bankDef("Dead Bug", "Core", "reps", false, 3, 10),
-    bankDef("Hanging Leg Raise", "Core", "reps", false, 3, 12),
-    bankDef("Hanging Knee Tuck", "Core", "reps", false, 3, 15),
-    bankDef("Bicycle Crunch", "Core", "reps", false, 3, 20),
-    bankDef("Russian Twist", "Core", "reps", true, 3, 20),
-    bankDef("Jump Squat", "Conditioning", "reps", false, 4, 12),
-    bankDef("Burpee", "Conditioning", "reps", false, 3, 10),
-    bankDef("Jump Rope", "Conditioning", "seconds", false, 5, 60),
-    bankDef("Mountain Climber", "Conditioning", "seconds", false, 3, 30),
-    bankDef("Bear Crawl", "Conditioning", "seconds", false, 3, 30),
-    bankDef("High Knees", "Conditioning", "seconds", false, 3, 30),
+    bankDef("Push-Up", "Push", "reps", true, 4, 15, 20, "Hands under shoulders, body in a straight line; lower your chest to the floor, then press back up."),
+    bankDef("Clapping Push-Up", "Push", "reps", false, 4, 8, null, "Explosive push-up — drive up hard enough for your hands to leave the floor and clap before landing."),
+    bankDef("Pike Push-Up", "Push", "reps", false, 3, 8, null, "Hips high in an inverted-V; bend your elbows to lower your head toward the floor, then press up — targets shoulders."),
+    bankDef("Tricep Dip", "Push", "reps", true, 3, 10, 12, "Hands on a bench behind you, legs extended; bend your elbows to lower your hips, then press back up."),
+    bankDef("Dumbbell Press", "Push", "reps", true, 3, 10, 14, "Lying on your back, press dumbbells straight up over your chest, then lower with control."),
+    bankDef("Dumbbell Shoulder Press", "Push", "reps", true, 3, 8, 12, "Standing or seated, press dumbbells overhead from shoulder height until your arms are straight."),
+    bankDef("Lateral Raise", "Push", "reps", true, 3, 12, 15, "Arms slightly bent, raise dumbbells out to the sides to shoulder height, then lower slowly."),
+    bankDef("Overhead Tricep Extension", "Push", "reps", true, 3, 10, 14, "Holding one dumbbell overhead with both hands, lower it behind your head, then extend back up."),
+    bankDef("Pull-Up", "Pull", "reps", true, 4, 8, 10, "Overhand grip, hang from the bar; pull your chin above the bar, then lower with control."),
+    bankDef("Chin-Up", "Pull", "reps", true, 3, 6, 10, "Underhand grip, hang from the bar; pull your chin above the bar — hits biceps more than a pull-up."),
+    bankDef("Dumbbell Row", "Pull", "reps", true, 3, 10, 14, "Hinge at the hips, back flat; pull the dumbbell to your ribs, squeezing your shoulder blade."),
+    bankDef("Reverse Fly", "Pull", "reps", true, 3, 12, 15, "Hinge forward, arms hanging with a slight bend; raise dumbbells out to the sides to work your rear delts."),
+    bankDef("Dumbbell Curl", "Pull", "reps", true, 3, 10, 14, "Elbows tucked at your sides, curl the dumbbells up toward your shoulders, then lower slowly."),
+    bankDef("Hammer Curl", "Pull", "reps", true, 3, 10, 14, "Like a dumbbell curl, but palms face each other the whole way — hits the forearm and outer bicep."),
+    bankDef("Goblet Squat", "Legs", "reps", true, 4, 12, 20, "Hold a dumbbell at your chest; squat until thighs are parallel to the floor, then drive back up."),
+    bankDef("Reverse Lunge", "Legs", "reps", true, 3, 10, 12, "Step one leg back and lower until both knees are near 90°, then push through the front foot to stand."),
+    bankDef("Bulgarian Split Squat", "Legs", "reps", true, 3, 8, 12, "Rear foot up on a bench, front foot forward; lower straight down and drive back up through the front leg."),
+    bankDef("Dumbbell RDL", "Legs", "reps", true, 3, 10, 14, "Soft knees, hinge at the hips and lower the dumbbells along your shins, feeling a stretch in your hamstrings."),
+    bankDef("Glute Bridge", "Legs", "reps", false, 3, 15, null, "Lying on your back, knees bent; drive your hips up by squeezing your glutes, then lower with control."),
+    bankDef("Calf Raise", "Legs", "reps", true, 4, 15, 25, "Standing, rise up onto the balls of your feet as high as you can, then lower slowly."),
+    bankDef("Plank", "Core", "seconds", false, 3, 60, null, "Forearms and toes on the floor, body in a straight line from head to heels — brace your core and hold."),
+    bankDef("Side Plank", "Core", "seconds", false, 3, 30, null, "Stacked on one forearm and the side of one foot, hips lifted in a line — hold, then switch sides."),
+    bankDef("Hollow Hold", "Core", "seconds", false, 3, 30, null, "Lying on your back, arms and legs extended, lower back pressed into the floor — hold the hollow shape."),
+    bankDef("Dead Bug", "Core", "reps", false, 3, 10, null, "On your back, arms up and knees bent 90°; lower opposite arm and leg toward the floor without arching your back."),
+    bankDef("Hanging Leg Raise", "Core", "reps", false, 3, 12, null, "Hang from the bar; keeping legs straight, raise them to hip height or higher without swinging."),
+    bankDef("Hanging Knee Tuck", "Core", "reps", false, 3, 15, null, "Hang from the bar; pull your knees up toward your chest, then lower — easier than a leg raise."),
+    bankDef("Bicycle Crunch", "Core", "reps", false, 3, 20, null, "On your back, hands behind your head; bring opposite elbow to opposite knee in a pedaling motion."),
+    bankDef("Russian Twist", "Core", "reps", true, 3, 20, null, "Seated, leaning back slightly with feet up or down; rotate a weight or your hands side to side."),
+    bankDef("Jump Squat", "Conditioning", "reps", false, 4, 12, null, "Squat down, then explode upward into a jump; land soft and go straight into the next rep."),
+    bankDef("Burpee", "Conditioning", "reps", false, 3, 10, null, "Squat, kick your feet back to a plank, push-up, jump feet back in, then jump up — full-body and cardio-heavy."),
+    bankDef("Jump Rope", "Conditioning", "seconds", false, 5, 60, null, "Small, quick hops on the balls of your feet, turning the rope with your wrists, not your arms."),
+    bankDef("Mountain Climber", "Conditioning", "seconds", false, 3, 30, null, "In a plank, drive your knees to your chest quickly, one at a time, like running in place."),
+    bankDef("Bear Crawl", "Conditioning", "seconds", false, 3, 30, null, "Hands and feet on the floor, knees just off the ground; crawl forward with opposite hand and foot together."),
+    bankDef("High Knees", "Conditioning", "seconds", false, 3, 30, null, "Jog in place, driving your knees up toward hip height as fast as you can."),
     // Added in schema v8 (alternatives the presets can swap to) -- see
     // BANK_ADDED_IN_V8 for why they're listed separately.
-    bankDef("Incline Push-Up", "Push", "reps", false, 3, 10),
-    bankDef("Knee Push-Up", "Push", "reps", false, 3, 10),
-    bankDef("Floor Press", "Push", "reps", true, 3, 8, 12),
-    bankDef("Table Row", "Pull", "reps", false, 3, 8),
-    bankDef("Reverse Snow Angel", "Pull", "reps", false, 3, 12),
-    bankDef("Bodyweight Squat", "Legs", "reps", false, 3, 15),
-    bankDef("Split Squat", "Legs", "reps", true, 3, 8, 12),
-    bankDef("Step-Up", "Legs", "reps", true, 3, 8, 12),
-    bankDef("Single-Leg Glute Bridge", "Legs", "reps", false, 3, 10),
-    bankDef("Wall Sit", "Legs", "seconds", false, 3, 30),
-    bankDef("Bird Dog", "Core", "reps", false, 3, 8),
-    bankDef("Reverse Crunch", "Core", "reps", false, 3, 12),
-    bankDef("Superman", "Core", "reps", false, 3, 12),
-    bankDef("Step Jack", "Conditioning", "seconds", false, 4, 40),
-    bankDef("Shadow Boxing", "Conditioning", "seconds", false, 3, 45)
+    bankDef("Incline Push-Up", "Push", "reps", false, 3, 10, null, "Hands on a bench or step, body straight; easier than a standard push-up — good for building up to one."),
+    bankDef("Knee Push-Up", "Push", "reps", false, 3, 10, null, "Standard push-up with knees on the floor instead of toes — same motion, less load."),
+    bankDef("Floor Press", "Push", "reps", true, 3, 8, 12, "Lying on the floor, press dumbbells up from chest height — a shorter, more joint-friendly bench press."),
+    bankDef("Table Row", "Pull", "reps", false, 3, 8, null, "Lying under a sturdy table or low bar, pull your chest up to it, then lower — a bodyweight row."),
+    bankDef("Reverse Snow Angel", "Pull", "reps", false, 3, 12, null, "Face down, arms at your sides; sweep them out and up like a snow angel, squeezing your shoulder blades."),
+    bankDef("Bodyweight Squat", "Legs", "reps", false, 3, 15, null, "Feet shoulder-width apart, squat down until thighs are parallel to the floor, then stand back up."),
+    bankDef("Split Squat", "Legs", "reps", true, 3, 8, 12, "Feet in a staggered stance, back heel up; lower straight down and drive back up through the front leg."),
+    bankDef("Step-Up", "Legs", "reps", true, 3, 8, 12, "Step one foot onto a bench or box and drive through it to stand fully, then step back down."),
+    bankDef("Single-Leg Glute Bridge", "Legs", "reps", false, 3, 10, null, "Glute bridge with one foot lifted — the working leg does it all, so expect it to be harder per side."),
+    bankDef("Wall Sit", "Legs", "seconds", false, 3, 30, null, "Back flat against a wall, knees bent to about 90° like sitting in an invisible chair — just hold it."),
+    bankDef("Bird Dog", "Core", "reps", false, 3, 8, null, "On hands and knees, extend opposite arm and leg straight out, keeping your back flat and hips level."),
+    bankDef("Reverse Crunch", "Core", "reps", false, 3, 12, null, "Lying on your back, knees bent; curl your hips up off the floor toward your chest, then lower slowly."),
+    bankDef("Superman", "Core", "reps", false, 3, 12, null, "Lying face down, lift arms, chest, and legs off the floor together, then lower with control."),
+    bankDef("Step Jack", "Conditioning", "seconds", false, 4, 40, null, "A low-impact jumping jack — step one foot out as you raise your arms, instead of jumping."),
+    bankDef("Shadow Boxing", "Conditioning", "seconds", false, 3, 45, null, "Throw punches at an imaginary opponent, staying light on your feet and keeping your core engaged.")
   ];
   // Existing accounts got their bank seeded at v7; these are added to it
   // at v8 without re-adding anything a user has since removed.
@@ -1840,6 +1842,23 @@
     "Step-Up", "Single-Leg Glute Bridge", "Wall Sit", "Bird Dog", "Reverse Crunch", "Superman", "Step Jack", "Shadow Boxing"];
   var BUILTIN_BANK_BY_NAME = {};
   DEFAULT_EXERCISE_BANK.forEach(function (e) { BUILTIN_BANK_BY_NAME[e.name] = e; });
+
+  // A template exercise's own description (copied in at pick-time) wins;
+  // otherwise fall back to the user's current bank entry, then the
+  // built-in default -- so an exercise that was added to a template
+  // before this feature existed (or via a starter plan, which builds
+  // templates directly rather than through the picker) still shows a
+  // description as long as its name matches a bank entry. Only a truly
+  // custom, never-banked exercise name comes back with nothing.
+  function resolveExerciseDescription(state, def) {
+    if (def && def.description) return def.description;
+    var name = def && def.name;
+    if (!name) return "";
+    var fromBank = state && state.exerciseBank && state.exerciseBank[name];
+    if (fromBank && fromBank.description) return fromBank.description;
+    var builtin = BUILTIN_BANK_BY_NAME[name];
+    return (builtin && builtin.description) || "";
+  }
 
   function sanitizeBankEntry(raw) {
     var def = sanitizeExerciseDef(raw);
@@ -1898,6 +1917,7 @@
   function bankEntryToTemplateDef(entry) {
     var def = { name: entry.name, metric: entry.metric, loaded: entry.loaded, targetSets: entry.targetSets, targetReps: entry.targetReps };
     if (entry.targetRepsMax) def.targetRepsMax = entry.targetRepsMax;
+    if (entry.description) def.description = entry.description;
     return def;
   }
 
@@ -2448,6 +2468,7 @@
   // internals (exercise names are used as object keys) are refused.
   var RESERVED_NAMES = ["__proto__", "constructor", "prototype"];
   var MAX_NAME_LENGTH = 60;
+  var MAX_DESCRIPTION_LENGTH = 160;
 
   function clampInt(value, min, max) {
     return Math.min(max, Math.max(min, Math.round(Number(value)) || 0));
@@ -2468,6 +2489,12 @@
     // repRangeCeiling), and only if it's actually above the floor.
     var max = clampInt(raw.targetRepsMax, 0, 999);
     if (def.loaded && max > def.targetReps) def.targetRepsMax = max;
+    // A short, optional how-to-do-it cue -- shown on the Today card so an
+    // unfamiliar exercise doesn't need a separate lookup. Untrusted (bank
+    // edits, plan imports), so it's trimmed and capped like the name.
+    if (typeof raw.description === "string" && raw.description.trim()) {
+      def.description = raw.description.trim().slice(0, MAX_DESCRIPTION_LENGTH);
+    }
     return def;
   }
 
@@ -2894,6 +2921,9 @@
     bankEntryToTemplateDef: bankEntryToTemplateDef,
     upsertBankEntry: upsertBankEntry,
     removeBankEntry: removeBankEntry,
+    resolveExerciseDescription: resolveExerciseDescription,
+    MAX_DESCRIPTION_LENGTH: MAX_DESCRIPTION_LENGTH,
+    BUILTIN_BANK_BY_NAME: BUILTIN_BANK_BY_NAME,
     setTemplateFocus: setTemplateFocus,
     formatExerciseTarget: formatExerciseTarget,
     buildSharePlanPayload: buildSharePlanPayload,
@@ -3773,9 +3803,12 @@
         "</div>";
     }).join("");
 
+    var description = L.resolveExerciseDescription(state, def);
+    var descLine = description ? '<div class="desc">' + esc(description) + "</div>" : "";
+
     return '<div class="exercise-card ' + (evm.complete ? "complete" : "") + '" data-exercise="' + esc(def.name) + '" data-suggested-reps="' + esc(suggestedReps) + '" data-suggested-weight="' + esc(suggestedWeight) + '">' +
       "<h3>" + esc(def.name) + (isCustom ? ' <span class="faint">custom</span>' : "") + "</h3>" +
-      '<div class="target">' + targetLine + "</div>" + rows + "</div>";
+      '<div class="target">' + targetLine + "</div>" + descLine + rows + "</div>";
   }
 
   function renderCardioForm(container, existing) {
@@ -4931,6 +4964,8 @@
       (mode === "edit" ? "" : '<label class="field-label">Name</label><input type="text" id="bankName" autocomplete="off" value="' + esc(base.name) + '">') +
       '<label class="field-label" style="margin-top:8px;">Category</label>' +
       '<div class="cat-chips" id="bankFormChips"></div>' +
+      '<label class="field-label" style="margin-top:8px;">Description (optional — shown on the Today card)</label>' +
+      '<input type="text" id="bankDescription" autocomplete="off" maxlength="' + L.MAX_DESCRIPTION_LENGTH + '" placeholder="e.g. how to set up and perform it" value="' + esc(L.resolveExerciseDescription(state, base)) + '">' +
       '<div class="grid3">' +
       '<div><label class="field-label">Sets</label><input type="number" id="bankSets" value="' + base.targetSets + '"></div>' +
       '<div><label class="field-label">Target</label><input type="number" id="bankReps" value="' + base.targetReps + '"></div>' +
@@ -4970,7 +5005,8 @@
       loaded: $("#bankLoaded").checked,
       targetSets: Number($("#bankSets").value),
       targetReps: Number($("#bankReps").value),
-      targetRepsMax: Number($("#bankRepsMax").value) || undefined
+      targetRepsMax: Number($("#bankRepsMax").value) || undefined,
+      description: $("#bankDescription").value
     });
     if (!result) return showError("Check the fields and try again.");
     state.exerciseBank = result.bank;
