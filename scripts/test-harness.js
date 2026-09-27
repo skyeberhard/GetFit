@@ -1035,6 +1035,17 @@ async function main() {
   check("removeBankEntry removes without mutating", !L.removeBankEntry(freshBank, "Burpee")["Burpee"] && !!freshBank["Burpee"]);
   check("setTemplateFocus keeps only valid, unique categories", L.setTemplateFocus({ exercises: [] }, ["Legs", "Arms", "Legs", "Core"]).focus.join(",") === "Legs,Core");
 
+  /* ---- exercise descriptions ---- */
+  check("every built-in bank entry has a short how-to description", L.DEFAULT_EXERCISE_BANK.every((e) => typeof e.description === "string" && e.description.length > 0 && e.description.length <= L.MAX_DESCRIPTION_LENGTH));
+  check("bankEntryToTemplateDef copies the description into a workout exercise", L.bankEntryToTemplateDef(freshBank["Goblet Squat"]).description === freshBank["Goblet Squat"].description);
+  const longDescEntry = L.upsertBankEntry(freshBank, { name: "Y", category: "Core", targetSets: 3, targetReps: 10, description: "  " + "x".repeat(L.MAX_DESCRIPTION_LENGTH + 40) + "  " }).entry;
+  check("a description is trimmed and capped at MAX_DESCRIPTION_LENGTH", longDescEntry.description.length === L.MAX_DESCRIPTION_LENGTH && !/^\s|\s$/.test(longDescEntry.description));
+  check("a blank description is dropped rather than stored empty", L.upsertBankEntry(freshBank, { name: "Z", category: "Core", targetSets: 3, targetReps: 10, description: "   " }).entry.description === undefined);
+  check("resolveExerciseDescription prefers the exercise's own description", L.resolveExerciseDescription({ exerciseBank: {} }, { name: "Burpee", description: "custom cue" }) === "custom cue");
+  check("resolveExerciseDescription falls back to the account's current bank entry", L.resolveExerciseDescription({ exerciseBank: { Burpee: { description: "bank cue" } } }, { name: "Burpee" }) === "bank cue");
+  check("resolveExerciseDescription falls back to the built-in default for an old, pre-migration copy", L.resolveExerciseDescription({ exerciseBank: {} }, { name: "Burpee" }) === L.BUILTIN_BANK_BY_NAME.Burpee.description);
+  check("resolveExerciseDescription returns empty for a name with no match anywhere", L.resolveExerciseDescription({ exerciseBank: {} }, { name: "Not A Real Exercise" }) === "");
+
   const v6Blob = Object.assign({}, L.freshState(), { schemaVersion: 6, exerciseBank: undefined });
   v6Blob.templates = L.cloneTemplates(L.WORKOUT_TEMPLATES);
   v6Blob.templates.upperA.exercises.push({ name: "Band Pull-Apart", metric: "reps", loaded: false, targetSets: 3, targetReps: 20 });
