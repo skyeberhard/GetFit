@@ -3540,6 +3540,30 @@
     else if (!streak.todayCompliant) chip.classList.add("streak-pending");
   }
 
+  // Shared by awardXp and any other save that needs to confirm itself --
+  // an edit to something already logged (e.g. updating today's cardio
+  // entry) earns no XP and changes nothing else visible on screen, so
+  // without this toast it's genuinely indistinguishable from the tap not
+  // having registered at all.
+  function showToast(text) {
+    var toast = $("#xpToast");
+    toast.textContent = text;
+    // The app-update and backup-nudge banners are both fixed to the very
+    // top with a higher z-index than this toast -- if either is showing,
+    // it sits exactly where the toast would render and hides it
+    // completely (this is how a cardio-log update's confirmation went
+    // unnoticed: no visible change to the form, and the one thing that
+    // *would* have confirmed it was covered). Drop the toast below
+    // whichever banner is up; getBoundingClientRect().bottom is already
+    // safe-area-aware since the banner's own padding accounts for it, so
+    // this is a plain pixel offset, not another calc() on top of it.
+    var banner = document.querySelector(".update-banner.show");
+    toast.style.top = banner ? (banner.getBoundingClientRect().bottom + 10) + "px" : "";
+    toast.classList.add("show");
+    clearTimeout(toast._t);
+    toast._t = setTimeout(function () { toast.classList.remove("show"); }, 1700);
+  }
+
   function awardXp(amount, label) {
     if (amount <= 0) return;
     state.xp += amount;
@@ -3548,11 +3572,7 @@
     // run -- without saving here too, that XP shows in the toast but never
     // reaches disk unless something else happens to save afterward.
     Store.save(state);
-    var toast = $("#xpToast");
-    toast.textContent = "+" + amount + " XP" + (label ? " · " + label : "");
-    toast.classList.add("show");
-    clearTimeout(toast._t);
-    toast._t = setTimeout(function () { toast.classList.remove("show"); }, 1700);
+    showToast("+" + amount + " XP" + (label ? " · " + label : ""));
   }
 
   /* ---------- TODAY view ---------- */
@@ -4423,6 +4443,8 @@
       awardXp(xp, cardio.cardioType);
       session.xpEarned = (session.xpEarned || 0) + xp;
       session.completedAt = new Date().toISOString();
+    } else {
+      showToast("Cardio log updated");
     }
     var streakAfter = L.computeStreakInfo(state, new Date());
     if (streakAfter.current > streakBefore.current) {
@@ -4714,6 +4736,7 @@
     // De-duplicate and sort -- nextOwnedWeight assumes a clean ascending
     // list, and typos ("20, 20, 25") shouldn't produce a duplicate rung.
     state.ownedWeights = weights.filter(function (n, i) { return weights.indexOf(n) === i; }).sort(function (a, b) { return a - b; });
+    showToast("Saved");
     persistAndRerender();
   }
 
@@ -5110,6 +5133,7 @@
       sleepGood: Number($("#baseSleepGood").value) || L.DEFAULT_BASELINES.sleepGood,
       sleepLow: Number($("#baseSleepLow").value) || L.DEFAULT_BASELINES.sleepLow
     };
+    showToast("Saved");
     persistAndRerender();
   }
 
