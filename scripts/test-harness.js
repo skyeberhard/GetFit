@@ -1234,6 +1234,74 @@ async function main() {
   check("daysBetween counts whole days elapsed", L.daysBetween("2026-09-10T00:00:00.000Z", new Date("2026-09-25T00:00:00.000Z")) === 15);
   check("daysBetween is 0 for the same day", L.daysBetween("2026-09-25T00:00:00.000Z", new Date("2026-09-25T05:00:00.000Z")) === 0);
 
+  /* ---- PR-1: shared-plan markup (0.1) + bodyweight moves (0.4) ---- */
+  const evilPlan = L.parsePlanChangePayload(JSON.stringify({
+    templates: {
+      evil: {
+        label: "<img src=x onerror=alert(1)>Evil",
+        exercises: [
+          { name: "<b>Pull</b>Up", description: "<script>steal()</script>do it", targetSets: 3, targetReps: 8 },
+          { name: "Push-Up", targetSets: 3, targetReps: 10 },
+          { name: "Mystery Move", targetSets: 3, targetReps: 10 }
+        ]
+      }
+    }
+  }), L.freshState());
+  const evilJson = JSON.stringify(evilPlan.payload);
+  check("plan import strips angle brackets from labels, names and descriptions", evilPlan.valid !== false && evilJson.indexOf("<") === -1 && evilJson.indexOf(">") === -1);
+  check("plan import keeps the text around stripped brackets", /Evil/.test(evilJson) && /PullUp/.test(evilJson) && /do it/.test(evilJson));
+  check("a name that is only angle brackets is rejected", L.sanitizeExerciseDef({ name: "<><>", targetSets: 3, targetReps: 8 }) === null);
+
+  const swapSrc = html.slice(html.indexOf("function openSwapModal"), html.indexOf("function confirmSwap"));
+  check("openSwapModal escapes the template label and id", swapSrc.length > 0 && /esc\(templates\[id\]\.label\)/.test(swapSrc) && /esc\(id\)/.test(swapSrc));
+
+  const pullUpEx = L.sanitizeExerciseDef({ name: "Push-Up", targetSets: 3, targetReps: 10 }) || {};
+  check("a plan import without `loaded` on Push-Up yields an unweighted exercise", pullUpEx.loaded === false);
+  check("a plan import without `loaded` on an unknown name still defaults to weighted", L.sanitizeExerciseDef({ name: "Mystery Move", targetSets: 3, targetReps: 10 }).loaded === true);
+  check("an explicit loaded:true on Pull-Up is respected (weighted pull-ups)", L.sanitizeExerciseDef({ name: "Pull-Up", loaded: true, targetSets: 3, targetReps: 5 }).loaded === true);
+
+  const bwNames = ["Pull-Up", "Push-Up", "Tricep Dip", "Chin-Up"];
+  const fresh9 = L.freshState();
+  check("fresh install: the four bodyweight moves are unweighted in the bank", bwNames.every((n) => fresh9.exerciseBank[n].loaded === false));
+  check("fresh install: default workouts list them unweighted", Object.keys(fresh9.templates).every((id) => (fresh9.templates[id].exercises || []).every((e) => bwNames.indexOf(e.name) === -1 || e.loaded === false)));
+
+  const owned = [10, 15, 20, 25, 30, 35];
+  const bwDef = { name: "Pull-Up", metric: "reps", loaded: false, targetSets: 4, targetReps: 8 };
+  const topOfRange = L.suggestProgression(bwDef, { weight: 0, reps: 12, targetReps: 8 }, "STEADY", owned, 0, false);
+  check("bodyweight pull-up at 12 reps suggests 13 reps, never a dumbbell weight", topOfRange.reps === 13 && topOfRange.weight === 0);
+  const oldFlagDef = Object.assign({}, bwDef, { loaded: true });
+  const staleFlag = L.suggestProgression(oldFlagDef, { weight: 0, reps: 12, targetReps: 8 }, "STEADY", owned, 0, false);
+  check("a weighted-flagged exercise with 0 lb logged also stays on reps (no 0 -> 10 lb jump)", staleFlag.reps === 13 && staleFlag.weight === 0);
+  const realLoaded = L.suggestProgression({ name: "Goblet Squat", metric: "reps", loaded: true, targetSets: 4, targetReps: 12, targetRepsMax: 16 }, { weight: 30, reps: 16, targetReps: 12 }, "STEADY", owned, 0, false);
+  check("a genuinely weighted exercise at the top of its range still steps to the next owned weight", realLoaded.weight === 35 && realLoaded.reps === 12);
+
+  const v8Weightless = L.freshState();
+  v8Weightless.schemaVersion = 8;
+  v8Weightless.templates.upperA.exercises = [
+    { name: "Pull-Up", metric: "reps", loaded: true, targetSets: 4, targetReps: 8, targetRepsMax: 12 },
+    { name: "Dumbbell Row", metric: "reps", loaded: true, targetSets: 3, targetReps: 10 }
+  ];
+  v8Weightless.exerciseBank["Pull-Up"] = Object.assign({}, v8Weightless.exerciseBank["Pull-Up"], { loaded: true, targetRepsMax: 12 });
+  v8Weightless.exerciseBank["Chin-Up"] = Object.assign({}, v8Weightless.exerciseBank["Chin-Up"], { loaded: true });
+  v8Weightless.exercises = { "Pull-Up": { name: "Pull-Up", loaded: true, bestWeight: 0, lastReps: 8, lastWeight: 0 } };
+  const frozenSnapshot = { isCardio: false, exercises: [{ name: "Pull-Up", metric: "reps", loaded: true, targetSets: 4, targetReps: 8 }] };
+  v8Weightless.sessions = [{ id: 1, date: "2026-09-21", dayLabel: "Upper", templateId: "upperA", templateSnapshot: frozenSnapshot, exercises: [{ name: "Pull-Up", sets: [{ reps: 8, weight: 0 }, { reps: 7, weight: 0 }] }] }];
+  const mig9 = L.migrate(JSON.parse(JSON.stringify(v8Weightless)));
+  check("v8->v9: stamps the current schema version", mig9.schemaVersion === L.SCHEMA_VERSION && L.SCHEMA_VERSION === 9);
+  check("v8->v9: an unlogged-weight Pull-Up becomes unweighted in the workout, bank and catalog", mig9.templates.upperA.exercises[0].loaded === false && mig9.exerciseBank["Pull-Up"].loaded === false && mig9.exercises["Pull-Up"].loaded === false);
+  check("v8->v9: the now-meaningless rep ceiling is dropped with the flag", mig9.templates.upperA.exercises[0].targetRepsMax === undefined && mig9.exerciseBank["Pull-Up"].targetRepsMax === undefined);
+  check("v8->v9: a never-logged Chin-Up is flipped too", mig9.exerciseBank["Chin-Up"].loaded === false);
+  check("v8->v9: other exercises are left weighted", mig9.templates.upperA.exercises[1].loaded === true);
+  check("v8->v9: logged sessions and their frozen snapshots are untouched", JSON.stringify(mig9.sessions[0].templateSnapshot) === JSON.stringify(frozenSnapshot) && mig9.sessions[0].exercises[0].sets.length === 2);
+
+  const v8Weighted = JSON.parse(JSON.stringify(v8Weightless));
+  v8Weighted.sessions[0].exercises[0].sets = [{ reps: 5, weight: 25 }];
+  const mig9Weighted = L.migrate(v8Weighted);
+  check("v8->v9: a Pull-Up that ever had a weight logged keeps its weighted flag everywhere", mig9Weighted.templates.upperA.exercises[0].loaded === true && mig9Weighted.exerciseBank["Pull-Up"].loaded === true && mig9Weighted.exercises["Pull-Up"].loaded === true);
+  check("v8->v9: that account's other never-weighted moves still flip (Chin-Up)", mig9Weighted.exerciseBank["Chin-Up"].loaded === false);
+  const mig9Twice = L.migrate(JSON.parse(JSON.stringify(mig9)));
+  check("v8->v9: re-migrating an already-current state is a no-op", JSON.stringify(mig9Twice) === JSON.stringify(mig9));
+
   /* ---- summary ---- */
   console.log("\n" + passes + " passed, " + failures + " failed.");
   if (failures > 0) process.exit(1);

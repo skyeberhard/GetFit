@@ -659,7 +659,7 @@
 (function (root) {
   "use strict";
 
-  var SCHEMA_VERSION = 8;
+  var SCHEMA_VERSION = 9;
 
   var WEEKDAY_LABELS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 
@@ -670,8 +670,8 @@
     upperA: {
       id: "upperA", label: "Upper Body — Push/Pull",
       exercises: [
-        { name: "Pull-Up", metric: "reps", loaded: true, targetSets: 4, targetReps: 8 },
-        { name: "Push-Up", metric: "reps", loaded: true, targetSets: 4, targetReps: 15 },
+        { name: "Pull-Up", metric: "reps", loaded: false, targetSets: 4, targetReps: 8 },
+        { name: "Push-Up", metric: "reps", loaded: false, targetSets: 4, targetReps: 15 },
         { name: "Dumbbell Row", metric: "reps", loaded: true, targetSets: 3, targetReps: 10 },
         { name: "Dumbbell Shoulder Press", metric: "reps", loaded: true, targetSets: 3, targetReps: 10 },
         { name: "Plank", metric: "seconds", loaded: false, targetSets: 3, targetReps: 45 }
@@ -690,9 +690,9 @@
     upperB: {
       id: "upperB", label: "Upper Body — Accessory",
       exercises: [
-        { name: "Pull-Up", metric: "reps", loaded: true, targetSets: 3, targetReps: 8 },
+        { name: "Pull-Up", metric: "reps", loaded: false, targetSets: 3, targetReps: 8 },
         { name: "Dumbbell Curl", metric: "reps", loaded: true, targetSets: 3, targetReps: 12 },
-        { name: "Tricep Dip", metric: "reps", loaded: true, targetSets: 3, targetReps: 12 },
+        { name: "Tricep Dip", metric: "reps", loaded: false, targetSets: 3, targetReps: 12 },
         { name: "Dumbbell Press", metric: "reps", loaded: true, targetSets: 3, targetReps: 10 },
         { name: "Plank", metric: "seconds", loaded: false, targetSets: 3, targetReps: 45 }
       ]
@@ -930,7 +930,10 @@
       return { weight: lastPerf.weight || 0, reps: lighterReps, note: isDeloadWeek ? "deload week" : "deload -20% reps" };
     }
 
-    if (exerciseDef.loaded) {
+    // A loaded exercise with no weight logged yet (0) has nothing to step
+    // up from -- nextOwnedWeight(0, ...) would jump straight to the lightest
+    // dumbbell. Treat it as bodyweight until a weight actually appears.
+    if (exerciseDef.loaded && lastPerf.weight > 0) {
       if (!hitFloor || holdBack) {
         return { weight: lastPerf.weight, reps: repFloor, note: (holdBack && hitFloor) ? "holding (readiness)" : "repeat weight" };
       }
@@ -1550,6 +1553,10 @@
       state = migrateV7ToV8(state);
       version = 8;
     }
+    if (version === 8) {
+      state = migrateV8ToV9(state);
+      version = 9;
+    }
     state.schemaVersion = SCHEMA_VERSION;
     return state;
   }
@@ -1701,6 +1708,57 @@
     return next;
   }
 
+  // Pull-Up, Push-Up, Tricep Dip and Chin-Up shipped flagged as weighted,
+  // so a fresh install showed "suggested 8 reps @ 0 lb" and, once at the top
+  // of the rep range, a jump to the lightest dumbbell. They're unweighted
+  // now -- but only for accounts that never logged a weight on them, so
+  // someone doing weighted pull-ups keeps the flag. Logged sessions and
+  // their frozen templateSnapshots are history and are left alone.
+  var BODYWEIGHT_MOVES_V9 = ["Pull-Up", "Push-Up", "Tricep Dip", "Chin-Up"];
+
+  function everLoggedWeight(state, name) {
+    var entry = state.exercises && state.exercises[name];
+    if (entry && Number(entry.bestWeight) > 0) return true;
+    return (state.sessions || []).some(function (s) {
+      return (s.exercises || []).some(function (e) {
+        return e.name === name && (e.sets || []).some(function (set) { return Number(set.weight) > 0; });
+      });
+    });
+  }
+
+  function unweight(def) {
+    var copy = Object.assign({}, def, { loaded: false });
+    delete copy.targetRepsMax; // only meaningful on a weighted exercise
+    return copy;
+  }
+
+  function migrateV8ToV9(state) {
+    var next = Object.assign({}, state);
+    var flip = BODYWEIGHT_MOVES_V9.filter(function (name) { return !everLoggedWeight(next, name); });
+    if (!flip.length) return next;
+    var shouldFlip = function (def) { return def && flip.indexOf(def.name) !== -1 && def.loaded !== false; };
+
+    if (next.templates) {
+      var templates = cloneTemplates(next.templates);
+      Object.keys(templates).forEach(function (id) {
+        var t = templates[id];
+        if (t && Array.isArray(t.exercises)) t.exercises = t.exercises.map(function (e) { return shouldFlip(e) ? unweight(e) : e; });
+      });
+      next.templates = templates;
+    }
+    if (next.exerciseBank) {
+      var bank = Object.assign({}, next.exerciseBank);
+      Object.keys(bank).forEach(function (name) { if (shouldFlip(bank[name])) bank[name] = unweight(bank[name]); });
+      next.exerciseBank = bank;
+    }
+    if (next.exercises) {
+      var catalog = Object.assign({}, next.exercises);
+      flip.forEach(function (name) { if (catalog[name] && catalog[name].loaded !== false) catalog[name] = Object.assign({}, catalog[name], { loaded: false }); });
+      next.exercises = catalog;
+    }
+    return next;
+  }
+
   function cloneTemplates(templates) {
     return JSON.parse(JSON.stringify(templates));
   }
@@ -1784,16 +1842,16 @@
   }
 
   var DEFAULT_EXERCISE_BANK = [
-    bankDef("Push-Up", "Push", "reps", true, 4, 15, 20, "Hands under shoulders, body in a straight line; lower your chest to the floor, then press back up."),
+    bankDef("Push-Up", "Push", "reps", false, 4, 15, null, "Hands under shoulders, body in a straight line; lower your chest to the floor, then press back up."),
     bankDef("Clapping Push-Up", "Push", "reps", false, 4, 8, null, "Explosive push-up — drive up hard enough for your hands to leave the floor and clap before landing."),
     bankDef("Pike Push-Up", "Push", "reps", false, 3, 8, null, "Hips high in an inverted-V; bend your elbows to lower your head toward the floor, then press up — targets shoulders."),
-    bankDef("Tricep Dip", "Push", "reps", true, 3, 10, 12, "Hands on a bench behind you, legs extended; bend your elbows to lower your hips, then press back up."),
+    bankDef("Tricep Dip", "Push", "reps", false, 3, 10, null, "Hands on a bench behind you, legs extended; bend your elbows to lower your hips, then press back up."),
     bankDef("Dumbbell Press", "Push", "reps", true, 3, 10, 14, "Lying on your back, press dumbbells straight up over your chest, then lower with control."),
     bankDef("Dumbbell Shoulder Press", "Push", "reps", true, 3, 8, 12, "Standing or seated, press dumbbells overhead from shoulder height until your arms are straight."),
     bankDef("Lateral Raise", "Push", "reps", true, 3, 12, 15, "Arms slightly bent, raise dumbbells out to the sides to shoulder height, then lower slowly."),
     bankDef("Overhead Tricep Extension", "Push", "reps", true, 3, 10, 14, "Holding one dumbbell overhead with both hands, lower it behind your head, then extend back up."),
-    bankDef("Pull-Up", "Pull", "reps", true, 4, 8, 10, "Overhand grip, hang from the bar; pull your chin above the bar, then lower with control."),
-    bankDef("Chin-Up", "Pull", "reps", true, 3, 6, 10, "Underhand grip, hang from the bar; pull your chin above the bar — hits biceps more than a pull-up."),
+    bankDef("Pull-Up", "Pull", "reps", false, 4, 8, null, "Overhand grip, hang from the bar; pull your chin above the bar, then lower with control."),
+    bankDef("Chin-Up", "Pull", "reps", false, 3, 6, null, "Underhand grip, hang from the bar; pull your chin above the bar — hits biceps more than a pull-up."),
     bankDef("Dumbbell Row", "Pull", "reps", true, 3, 10, 14, "Hinge at the hips, back flat; pull the dumbbell to your ribs, squeezing your shoulder blade."),
     bankDef("Reverse Fly", "Pull", "reps", true, 3, 12, 15, "Hinge forward, arms hanging with a slight bend; raise dumbbells out to the sides to work your rear delts."),
     bankDef("Dumbbell Curl", "Pull", "reps", true, 3, 10, 14, "Elbows tucked at your sides, curl the dumbbells up toward your shoulders, then lower slowly."),
@@ -2474,14 +2532,26 @@
     return Math.min(max, Math.max(min, Math.round(Number(value)) || 0));
   }
 
+  // Names, labels and descriptions can arrive from a plan import or share
+  // link, so markup is removed outright (whole tags first, then any stray bracket) (render sites also esc()
+  // them -- this is the second layer, so a missed sink can't carry markup).
+  function stripAngleBrackets(s) {
+    return String(s).replace(/<[^>]*>/g, "").replace(/[<>]/g, "");
+  }
+
   function sanitizeExerciseDef(raw) {
-    if (!raw || typeof raw.name !== "string" || !raw.name.trim()) return null;
-    var name = raw.name.trim().slice(0, MAX_NAME_LENGTH);
+    if (!raw || typeof raw.name !== "string") return null;
+    var name = stripAngleBrackets(raw.name).trim().slice(0, MAX_NAME_LENGTH);
+    if (!name) return null;
     if (RESERVED_NAMES.indexOf(name) !== -1) return null;
+    // An explicit true/false wins. When a payload omits the flag, a built-in
+    // exercise keeps its own (so a bare "Push-Up" isn't silently weighted);
+    // only an unknown name defaults to weighted.
+    var builtin = BUILTIN_BANK_BY_NAME[name];
     var def = {
       name: name,
       metric: raw.metric === "seconds" ? "seconds" : "reps",
-      loaded: raw.loaded !== false,
+      loaded: typeof raw.loaded === "boolean" ? raw.loaded : (builtin ? builtin.loaded : true),
       targetSets: clampInt(raw.targetSets, 1, 20),
       targetReps: clampInt(raw.targetReps, 1, 999)
     };
@@ -2492,8 +2562,9 @@
     // A short, optional how-to-do-it cue -- shown on the Today card so an
     // unfamiliar exercise doesn't need a separate lookup. Untrusted (bank
     // edits, plan imports), so it's trimmed and capped like the name.
-    if (typeof raw.description === "string" && raw.description.trim()) {
-      def.description = raw.description.trim().slice(0, MAX_DESCRIPTION_LENGTH);
+    if (typeof raw.description === "string") {
+      var description = stripAngleBrackets(raw.description).trim().slice(0, MAX_DESCRIPTION_LENGTH);
+      if (description) def.description = description;
     }
     return def;
   }
@@ -2528,7 +2599,7 @@
     if (changes.templates && typeof changes.templates === "object") {
       Object.keys(changes.templates).forEach(function (templateId) {
         var entry = changes.templates[templateId] || {};
-        var label = typeof entry.label === "string" ? entry.label.trim().slice(0, MAX_NAME_LENGTH) : "";
+        var label = typeof entry.label === "string" ? stripAngleBrackets(entry.label).trim().slice(0, MAX_NAME_LENGTH) : "";
         var isExisting = validIds.indexOf(templateId) !== -1;
         if (!isExisting) {
           if (!label) {
@@ -2998,6 +3069,7 @@
     listLoggedExercises: listLoggedExercises,
     detectPlateaus: detectPlateaus,
     parsePlanChangePayload: parsePlanChangePayload,
+    sanitizeExerciseDef: sanitizeExerciseDef,
     diffPlanChanges: diffPlanChanges,
     applyPlanChanges: applyPlanChanges
   };
@@ -3767,14 +3839,14 @@
     if (isCustom) {
       targetLine = evm.suggestion.note === "no history"
         ? def.targetSets + " sets · no history yet"
-        : def.targetSets + " sets · suggested " + evm.suggestion.reps + " " + unit + (def.loaded ? " @ " + evm.suggestion.weight + " lb" : "") + " (" + evm.suggestion.note + ")";
+        : def.targetSets + " sets · suggested " + evm.suggestion.reps + " " + unit + (def.loaded && evm.suggestion.weight > 0 ? " @ " + evm.suggestion.weight + " lb" : "") + " (" + evm.suggestion.note + ")";
     } else if (def.loaded) {
       // Show the rep range (floor–ceiling), not just the floor -- the
       // suggestion builds reps up through that range before adding weight,
       // so the range itself is part of what you're aiming for.
       var ceiling = L.repRangeCeiling(def);
       targetLine = def.targetSets + " × " + def.targetReps + "–" + ceiling + " " + unit +
-        " · suggested " + evm.suggestion.reps + " " + unit + " @ " + evm.suggestion.weight + " lb (" + evm.suggestion.note + ")";
+        " · suggested " + evm.suggestion.reps + " " + unit + (evm.suggestion.weight > 0 ? " @ " + evm.suggestion.weight + " lb" : "") + " (" + evm.suggestion.note + ")";
     } else {
       // Bodyweight exercises progress too (reps +1 once you hit target),
       // but the suggestion was never actually shown for them before --
@@ -4487,7 +4559,7 @@
     var vm = L.buildTodayViewModel(state, viewDate);
     var templates = L.getTemplates(state);
     var options = L.getTemplateIds(state).map(function (id) {
-      return '<button class="btn block" style="margin-bottom:6px;" data-action="confirm-swap" data-template="' + id + '">' + templates[id].label + "</button>";
+      return '<button class="btn block" style="margin-bottom:6px;" data-action="confirm-swap" data-template="' + esc(id) + '">' + esc(templates[id].label) + "</button>";
     }).join("");
     var titleSuffix = isRealToday(vm.dateKey) ? "" : " — " + formatDateLabel(vm.dateKey);
     var body =
