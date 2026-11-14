@@ -18,12 +18,12 @@ The direction comes from an evaluation of the app at commit `542011b`. The full 
 
 | Phase | Goal | Status |
 | --- | --- | --- |
-| 0 | Fix confirmed bugs: script injection through shared plans, progression history that shifts mid-workout, bodyweight moves treated as weighted | In progress |
+| 0 | Fix confirmed bugs: script injection through shared plans, progression history that shifts mid-workout, bodyweight moves treated as weighted | Shipped |
 | 1 | Cut mid-workout friction: suggestions in the input fields, a rest timer, cardio on any day | Planned |
 | 2 | Planning: a Plan tab, multi-week cycles, short/full day variants, missed-day handling, one-tap handoff to an AI assistant | Planned |
 | 3 | Outcome tracking: body metrics, lighter readiness entry, session detail | Planned |
 | 4 | Share-readiness: accessibility, units, health disclaimer, version and feedback link | Planned |
-| 5 | Exercise model: stable ids, muscles and equipment, library import, a radar built on muscle coverage | Planned |
+| 5 | Exercise model: stable ids, muscles and equipment, library import, a radar built on muscle coverage | In progress (stable ids up for review) |
 
 The positioning is a hypothesis, not a launch plan. Before any payment or sync work, the next step is to get the app to a handful of home trainers who use an AI assistant and see who is still logging after four weeks. See the spec for the market comparison and what selling it would require (data that cannot vanish, a way to pay, terms).
 
