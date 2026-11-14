@@ -93,6 +93,12 @@
   - The weighted flag is treated as a setting: an explicit "no" on the newest log wins, any logged weight means yes, otherwise the stored value stands, so v9's bodyweight fix isn't undone by old sessions.
   - The "New PR!" check moved into the logic layer (`countSessionPRs`) and compares against the best before the session's day. A first-ever log is no longer counted as a PR.
 
+- [x] **Stable exercise ids (PR-3a of [docs/execution-plan.md](execution-plan.md); spec 5.1, part 1).** Exercises were identified only by name, so renaming "Pull-Up" in the template editor started a new, empty history, and an imported "push up" sat beside "Push-Up" as a different exercise. Now:
+  - Every exercise has an `id`, a slug of the name it was first created under ("pull-up"). The bank and progress catalog are keyed by it, and workouts, sessions and snapshots carry it. Everything that compares exercises goes through `exerciseIdOf`, which also gives name-only objects (plan imports, presets, old share links) the id their name would get.
+  - **Rename** (`renameExercise`, from the Exercise Bank editor's name field or the template editor's) changes the display name in the bank, every workout and the catalog, and keeps the id, so history, bests and suggestions carry over. Logged sessions keep the name they were logged under. A name that loosely matches a *different* exercise is refused (combining two is Merge, PR-3b). A renamed built-in keeps its how-to cue.
+  - **Loose matching** (`normalizeExerciseName`: case, spaces, hyphens and a trailing "s" ignored) on plan import, the import preview, "+ Custom Exercise", the bank's "New Exercise" and the picker's "+ Create": "push ups" is your Push-Up, history and all. An id inside an imported plan is ignored so it can't claim one of your exercises; share links carry names only.
+  - **Schema v10** stamps ids everywhere. The same name always gets the same id; two different names that would slug alike get "-2". Objects that already have an id keep it, so the migration is idempotent. On a real export, compliance for every day, streaks, attributes, PRs, plateaus, the digest text and today's suggestions are identical before and after.
+
 ## Explicitly deferred (flagged as scope creep for this app)
 
 - Reading / Scripture memorization tracking — a different habit domain from fitness; revisit as a separate tool or a genuinely thin, isolated tab if still wanted later.
@@ -105,5 +111,5 @@
 
 - `node --check` runs against every inline `<script>` block via `scripts/test-harness.js`
 - The pure logic/view-model layer (`TrainLogic`, embedded in `app/index.html`) is dual-exported (CommonJS in Node, `window` in browser) so the harness can unit-test readiness scoring (including its effect on progression) and rolling-baseline calculation, rep-range/owned-weight progression suggestions, deload-week and miss-streak failure handling, estimated-1RM PR/plateau detection, XP/leveling, streaks (current and the historical-peak scan), consistency, attributes, plan-change parse/diff/apply, rest-day validation, template editing (including adding/removing whole templates, not just exercises within one), template-snapshot compliance, swap-vs-rest-day interaction, import-payload validation, the backup-reminder day-count helper, and schema migration without a browser
-- Schema migration is tested as a chain: reconstructed v0 (legacy) → v1 → v2 → v3 → v4 → v5 → v6 → v7 → v8 → current (v9), per the "test migrations against real saved data" principle
+- Schema migration is tested as a chain: reconstructed v0 (legacy) → v1 → v2 → v3 → v4 → v5 → v6 → v7 → v8 → v9 → current (v10), per the "test migrations against real saved data" principle
 - Run `node scripts/test-harness.js` before considering any change to `app/index.html` done
