@@ -901,7 +901,7 @@
   // lastPerf.reps and its target from the SAME catalog field
   // (catalogEntry.lastReps), so hitFloor is always true there by
   // construction and could never confirm a miss on its own. The catalog's
-  // missStreak (see updateExerciseCatalog) is computed against the target
+  // missStreak (see deriveCatalog) is computed against the target
   // that was actually live *at the time*, which is the only place a
   // custom exercise's miss is knowable at all.
   function suggestProgression(exerciseDef, lastPerf, readinessVerdict, ownedWeights, consecutiveMisses, isDeloadWeek) {
@@ -972,6 +972,165 @@
     var def = { loaded: !!catalogEntry.loaded, targetReps: catalogEntry.lastReps };
     var lastPerf = { weight: catalogEntry.lastWeight || 0, reps: catalogEntry.lastReps, targetReps: catalogEntry.lastReps };
     return suggestProgression(def, lastPerf, readinessVerdict, ownedWeights, catalogEntry.missStreak || 0, isDeloadWeek);
+  }
+
+  /* ---------- progression catalog, derived from sessions ----------
+     state.exercises is a cache of per-exercise progression facts (last
+     performance, bests, miss streak). Sessions are the source of truth:
+     the cache used to be updated incrementally on every typed set, which
+     assumed the session being edited was the newest one. Two bugs came
+     from that -- today's half-finished workout became its own "last time"
+     (so the suggestion changed mid-workout), and editing an old day
+     rewrote today's progression. Everything here replays sessions in date
+     order instead, so the answer depends only on what was logged. */
+
+  // One session's numbers for one exercise, from its filled sets only.
+  // lastReps is the WORST set (so "hit target" means every set met it) and
+  // lastWeight the heaviest (the weight actually being worked) -- the same
+  // definitions the incremental catalog used.
+  function sessionExercisePerformance(exEntry) {
+    var sets = (exEntry && exEntry.sets) || [];
+    var filled = sets.filter(isSetFilled);
+    if (!filled.length) return null;
+    var minReps = Number(filled[0].reps), maxReps = 0, maxWeight = 0;
+    filled.forEach(function (set) {
+      var reps = Number(set.reps), weight = Number(set.weight) || 0;
+      if (reps < minReps) minReps = reps;
+      if (reps > maxReps) maxReps = reps;
+      if (weight > maxWeight) maxWeight = weight;
+    });
+    var loadedBest = bestE1RMInSets(sets);
+    return { minReps: minReps, maxReps: maxReps, maxWeight: maxWeight, e1rm: loadedBest ? Math.round(loadedBest.e1rm) : 0 };
+  }
+
+  // The target an exercise was judged against that day: the session's own
+  // frozen snapshot. Sessions from before snapshots existed have none.
+  function sessionTargetDef(session, name) {
+    var snap = session && session.templateSnapshot;
+    var list = (snap && snap.exercises) || [];
+    for (var i = 0; i < list.length; i++) if (list[i].name === name) return list[i];
+    return null;
+  }
+
+  // Rebuilds catalog entries by replaying sessions oldest to newest.
+  //   opts.before -- a date key; only sessions strictly before it count
+  //                  (what was known going INTO that day)
+  //   opts.names  -- limit to these exercise names
+  // Date keys are compared as strings ("YYYY-MM-DD" sorts correctly), never
+  // parsed into Dates, so the result can't depend on the device timezone.
+  //
+  // missStreak only moves on a session where the exercise was completed,
+  // judged against that session's snapshot target (a custom exercise's
+  // target is its own previous result). A session with no snapshot and no
+  // custom target can't be judged reliably -- today's template may differ
+  // from what was live back then -- so it leaves the streak where it was
+  // rather than risk inventing a deload.
+  function deriveCatalog(state, opts) {
+    opts = opts || {};
+    var before = opts.before || null;
+    var only = opts.names || null;
+    var stored = (state && state.exercises) || {};
+    var sessions = ((state && state.sessions) || [])
+      .filter(function (s) { return s && typeof s.date === "string" && (!before || s.date < before); })
+      .slice()
+      .sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+
+    var acc = {};
+    sessions.forEach(function (session) {
+      (session.exercises || []).forEach(function (exEntry) {
+        var name = exEntry && exEntry.name;
+        if (!name || (only && only.indexOf(name) === -1)) return;
+        var perf = sessionExercisePerformance(exEntry);
+        if (!perf) return;
+        var prev = acc[name] || null;
+        var def = sessionTargetDef(session, name);
+        var targetSets = def ? def.targetSets : exEntry.sets.length;
+        var missStreak = prev ? prev.missStreak : 0;
+        if (allSetsComplete(exEntry.sets, targetSets)) {
+          var target = def ? def.targetReps : (exEntry.isCustom ? (prev ? prev.lastReps : null) : undefined);
+          if (target !== undefined) missStreak = (target == null || perf.minReps >= target) ? 0 : missStreak + 1;
+        }
+        acc[name] = {
+          name: name,
+          lastReps: perf.minReps,
+          lastWeight: perf.maxWeight,
+          bestWeight: Math.max(prev ? prev.bestWeight : 0, perf.maxWeight),
+          bestReps: Math.max(prev ? prev.bestReps : 0, perf.maxReps),
+          bestE1RM: Math.max(prev ? prev.bestE1RM : 0, perf.e1rm),
+          missStreak: missStreak,
+          metric: exEntry.metric || (prev && prev.metric) || (stored[name] && stored[name].metric) || "reps",
+          lastSetCount: exEntry.sets.length,
+          lastLoadedFlag: exEntry.loaded,
+          everWeighted: (prev && prev.everWeighted) || perf.maxWeight > 0,
+          lastDate: session.date
+        };
+      });
+    });
+
+    var out = {};
+    Object.keys(acc).forEach(function (name) {
+      var a = acc[name], s = stored[name];
+      // Weighted-or-not is a setting, not just history: an explicit "no" on
+      // the newest log wins, any weight ever logged means yes, and otherwise
+      // the stored setting stands -- so the v9 bodyweight fix isn't undone by
+      // old sessions that recorded loaded: true with no weight.
+      var loaded = a.lastLoadedFlag === false ? false
+        : a.everWeighted ? true
+        : (s && typeof s.loaded === "boolean") ? s.loaded
+        : true;
+      out[name] = {
+        name: name,
+        lastReps: a.lastReps,
+        lastWeight: a.lastWeight,
+        bestWeight: a.bestWeight,
+        bestReps: a.bestReps,
+        bestE1RM: a.bestE1RM,
+        missStreak: a.missStreak,
+        metric: a.metric,
+        loaded: loaded,
+        lastSetCount: a.lastSetCount,
+        // Orders the Progress tab's exercise list; a rebuild must not reset it.
+        updatedAt: (s && s.updatedAt) || (a.lastDate + "T00:00:00.000Z")
+      };
+    });
+    return out;
+  }
+
+  function deriveCatalogEntry(state, name, opts) {
+    var o = Object.assign({}, opts || {}, { names: [name] });
+    return deriveCatalog(state, o)[name] || null;
+  }
+
+  // The most recent performance logged BEFORE dateKey, as { weight, reps }
+  // (heaviest weight, worst set) -- what a suggestion for that day builds on.
+  function lastPerfBefore(state, name, dateKey) {
+    var entry = deriveCatalogEntry(state, name, { before: dateKey });
+    return entry ? { weight: entry.lastWeight, reps: entry.lastReps } : null;
+  }
+
+  // The whole cache rebuilt from sessions. Entries with no session behind
+  // them are kept as they are; sessions themselves are never touched.
+  function rebuildExerciseCatalog(state) {
+    var next = Object.assign({}, (state && state.exercises) || {});
+    var derived = deriveCatalog(state);
+    Object.keys(derived).forEach(function (name) { next[name] = derived[name]; });
+    return next;
+  }
+
+  // How many sets this session beat the prior best with (prior = the
+  // catalog entry as it stood before this session's day). A session with
+  // weight is judged on estimated 1RM, otherwise on reps/seconds -- the same
+  // rule as countRecentPRs. A first-ever log has nothing to beat, so it
+  // isn't a PR.
+  function countSessionPRs(sets, prior) {
+    if (!prior) return 0;
+    sets = sets || [];
+    if (bestE1RMInSets(sets)) {
+      var prevE1RM = prior.bestE1RM || 0;
+      return sets.filter(function (s) { return s && s.weight > 0 && estimate1RM(s.weight, s.reps || 0) > prevE1RM; }).length;
+    }
+    var prevReps = prior.bestReps || 0;
+    return sets.filter(function (s) { return s && s.reps && s.reps > prevReps; }).length;
   }
 
   /* ---------- set completion ---------- */
@@ -1648,7 +1807,7 @@
   }
 
   // Adds `missStreak` (consecutive sessions in a row that missed target,
-  // tracked per exercise -- see updateExerciseCatalog) so suggestProgression
+  // tracked per exercise -- see deriveCatalog) so suggestProgression
   // can offer an actual deload instead of asking for the same failed
   // weight forever, and `deloadWeeks` (a weekStartKey -> true map for
   // program-wide deload weeks, toggled from the Today tab). missStreak
@@ -3070,6 +3229,11 @@
     detectPlateaus: detectPlateaus,
     parsePlanChangePayload: parsePlanChangePayload,
     sanitizeExerciseDef: sanitizeExerciseDef,
+    deriveCatalog: deriveCatalog,
+    deriveCatalogEntry: deriveCatalogEntry,
+    lastPerfBefore: lastPerfBefore,
+    rebuildExerciseCatalog: rebuildExerciseCatalog,
+    countSessionPRs: countSessionPRs,
     diffPlanChanges: diffPlanChanges,
     applyPlanChanges: applyPlanChanges
   };
@@ -3365,6 +3529,9 @@
   document.addEventListener("DOMContentLoaded", function () {
     Store.load().then(function (s) {
       state = s;
+      // The progression cache is rebuilt from sessions on every load, so
+      // entries skewed by the old incremental updates correct themselves.
+      state.exercises = L.rebuildExerciseCatalog(state);
       // Catch-up for accounts that already had a higher streak in their
       // history than state.longestStreak ever recorded (see
       // syncLongestStreak) -- runs once per load so a peak from before
@@ -3799,13 +3966,17 @@
         '<div style="margin-top:10px;"><button class="btn ghost sm" data-action="open-swap">Swap this day</button> ' +
         '<button class="btn ghost sm" data-action="open-custom-exercise">+ Custom Exercise</button></div>' +
         "</div>" +
-        renderCustomExerciseCards(vm, readinessVerdict);
+        renderCustomExerciseCards(vm, readinessVerdict, L.deriveCatalog(state, { before: vm.dateKey }));
       renderCardioForm($("#cardioFormSlot"), vm.todaySession && vm.todaySession.cardio);
       return;
     }
 
+    // Suggestions build on what was logged BEFORE the viewed day, never on
+    // the day itself -- otherwise a half-finished workout becomes its own
+    // "last time" and the suggestion shifts after the first set.
+    var history = L.deriveCatalog(state, { before: vm.dateKey });
     var exVms = effectiveTemplate.exercises.map(function (def) {
-      return L.buildExerciseViewModel(def, vm.todaySession, state.exercises, readinessVerdict, state.ownedWeights, vm.isDeload);
+      return L.buildExerciseViewModel(def, vm.todaySession, history, readinessVerdict, state.ownedWeights, vm.isDeload);
     });
     var allDone = exVms.every(function (e) { return e.complete; });
 
@@ -3817,16 +3988,16 @@
       "</div>";
 
     html += exVms.map(function (evm) { return renderExerciseCard(evm); }).join("");
-    html += renderCustomExerciseCards(vm, readinessVerdict);
+    html += renderCustomExerciseCards(vm, readinessVerdict, history);
 
     el.innerHTML = html;
   }
 
-  function renderCustomExerciseCards(vm, readinessVerdict) {
+  function renderCustomExerciseCards(vm, readinessVerdict, history) {
     var customEx = (vm.todaySession && vm.todaySession.exercises || []).filter(function (e) { return e.isCustom; });
     return customEx.map(function (e) {
       var def = { name: e.name, metric: e.metric || "reps", loaded: e.loaded !== undefined ? e.loaded : true, targetSets: e.sets.length || 1, targetReps: 0 };
-      var suggestion = L.suggestCustomProgression(state.exercises[e.name], readinessVerdict, state.ownedWeights, vm.isDeload);
+      var suggestion = L.suggestCustomProgression(history[e.name], readinessVerdict, state.ownedWeights, vm.isDeload);
       var evm = { def: def, sets: e.sets, suggestion: suggestion, complete: L.allSetsComplete(e.sets, e.sets.length) };
       return renderExerciseCard(evm, true);
     }).join("");
@@ -4249,34 +4420,22 @@
     var streakBefore = L.computeStreakInfo(state, new Date());
 
     if (nowComplete && !exEntry._xpAwarded) {
-      var catalogPrev = state.exercises[exerciseName];
       var setsThisExercise = exEntry.sets.slice(0, targetSets);
-      // A session with any weighted set is judged as a loaded performance
-      // (estimated 1RM is the progression axis); otherwise it's bodyweight/
-      // timed, where reps (or seconds, same field) are the axis instead.
-      // Mirrors countRecentPRs so the "New PR!" toast and the Strength
-      // attribute agree on what counts as a PR.
-      var loadedBest = L.bestE1RMInSets(setsThisExercise);
-      var prCount;
-      if (loadedBest) {
-        var prevBestE1RM = catalogPrev ? (catalogPrev.bestE1RM || 0) : 0;
-        prCount = setsThisExercise.filter(function (s) {
-          return s.weight && s.weight > 0 && L.estimate1RM(s.weight, s.reps || 0) > prevBestE1RM;
-        }).length;
-      } else {
-        var prevBestReps = catalogPrev ? (catalogPrev.bestReps || 0) : 0;
-        prCount = setsThisExercise.filter(function (s) { return s.reps && s.reps > prevBestReps; }).length;
-      }
+      // Compared against the best as it stood BEFORE this session's day --
+      // the cache already includes this session, so comparing against it
+      // would mean nothing could ever beat it.
+      var prior = L.deriveCatalogEntry(state, exerciseName, { before: session.date });
+      var prCount = L.countSessionPRs(setsThisExercise, prior);
 
       var xp = setsThisExercise.reduce(function (sum, s) { return sum + L.xpForSet(s, def); }, 0);
       xp += prCount * L.PR_BONUS_XP;
       awardXp(xp, prCount > 0 ? (def ? def.name : exerciseName) + " • New PR!" : (def ? def.name : exerciseName));
       session.xpEarned = (session.xpEarned || 0) + xp;
       exEntry._xpAwarded = true;
-      updateExerciseCatalog(exerciseName, exEntry, def, nowComplete);
+      refreshCatalogEntry(exerciseName);
       checkWorkoutComplete(session, effectiveTemplate);
     } else {
-      updateExerciseCatalog(exerciseName, exEntry, def, nowComplete);
+      refreshCatalogEntry(exerciseName);
     }
     exEntry._wasComplete = nowComplete;
 
@@ -4354,65 +4513,14 @@
     }
   }
 
-  function updateExerciseCatalog(name, exEntry, def, nowComplete) {
-    var filled = exEntry.sets.filter(function (s) { return L.isSetFilled(s); });
-    if (!filled.length) return;
-    var prev = state.exercises[name];
-    var maxWeightInSession = filled.reduce(function (m, s) { return (s.weight && s.weight > m) ? s.weight : m; }, 0);
-    var maxRepsInSession = filled.reduce(function (m, s) { return (s.reps && s.reps > m) ? s.reps : m; }, 0);
-    // lastReps is the WORST (minimum) set this session, not literally the
-    // last one typed -- suggestProgression treats "lastReps >= target" as
-    // "hit target," so using the last-typed set made that order-dependent:
-    // 12/12/8 and 8/12/12 produced different suggestions despite being the
-    // same session, and either could look like a false "hit" depending on
-    // which set happened to be filled last. Using the minimum makes "hit
-    // target" correctly mean every set met it. lastWeight is the max used
-    // this session (the weight actually being worked at), not whichever set
-    // happened to be filled last.
-    var minRepsInSession = filled.reduce(function (m, s) { return s.reps < m ? s.reps : m; }, filled[0].reps);
-    var loadedBestThisSession = L.bestE1RMInSets(exEntry.sets);
-
-    // missStreak (consecutive sessions in a row that missed target) only
-    // gets touched once an exercise is actually complete -- this function
-    // runs on every set you fill in, not just at completion, and while
-    // you're still mid-entry the "worst set so far" is a moving target
-    // that would otherwise flicker the streak up and down as you type.
-    // Once complete, the target/prior-streak to compare against is
-    // snapshotted the first time (_missCheckBaseline) rather than re-read
-    // from `prev` on every subsequent call -- prev is this exercise's own
-    // catalog entry, which this same function just overwrote on the
-    // previous call, so re-reading it fresh each time would compound the
-    // streak within a single session instead of tracking it across them.
-    var missStreak = (prev && prev.missStreak) || 0;
-    if (nowComplete) {
-      if (exEntry._missCheckBaseline === undefined) {
-        exEntry._missCheckBaseline = {
-          missStreak: (prev && prev.missStreak) || 0,
-          target: def ? def.targetReps : (prev ? prev.lastReps : null)
-        };
-      }
-      var baseline = exEntry._missCheckBaseline;
-      var hitThisSession = baseline.target == null ? true : minRepsInSession >= baseline.target;
-      missStreak = hitThisSession ? 0 : baseline.missStreak + 1;
-    }
-
-    state.exercises[name] = {
-      name: name,
-      lastReps: minRepsInSession,
-      lastWeight: maxWeightInSession,
-      bestWeight: Math.max((prev && prev.bestWeight) || 0, maxWeightInSession),
-      bestReps: Math.max((prev && prev.bestReps) || 0, maxRepsInSession),
-      // Estimated 1RM (Epley), tracked alongside raw bestWeight -- this is
-      // what PR/plateau detection actually compares against, since it
-      // credits a rep increase at the same weight as the real progress it
-      // is (see estimate1RM).
-      bestE1RM: Math.max((prev && prev.bestE1RM) || 0, loadedBestThisSession ? Math.round(loadedBestThisSession.e1rm) : 0),
-      missStreak: missStreak,
-      metric: exEntry.metric || (prev && prev.metric) || "reps",
-      loaded: exEntry.loaded !== undefined ? exEntry.loaded : ((prev && prev.loaded) || maxWeightInSession > 0),
-      lastSetCount: exEntry.sets.length,
-      updatedAt: new Date().toISOString()
-    };
+  // Rebuilds one exercise's cache entry from every session, so editing any
+  // day -- not just the newest -- leaves it correct. No filled sets left
+  // anywhere means there's nothing to remember.
+  function refreshCatalogEntry(name) {
+    var derived = L.deriveCatalogEntry(state, name);
+    if (!derived) { delete state.exercises[name]; return; }
+    derived.updatedAt = new Date().toISOString();
+    state.exercises[name] = derived;
   }
 
   // Tapping the checkmark fills in what was actually prescribed for this
@@ -5759,6 +5867,7 @@
         // from silently erasing everything with no way back.
         downloadJsonBackup(state, "train-pre-import-backup-");
         state = L.migrate(parsed);
+        state.exercises = L.rebuildExerciseCatalog(state);
         persistAndRerender();
       };
       reader.readAsText(file);

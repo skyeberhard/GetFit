@@ -1302,6 +1302,100 @@ async function main() {
   const mig9Twice = L.migrate(JSON.parse(JSON.stringify(mig9)));
   check("v8->v9: re-migrating an already-current state is a no-op", JSON.stringify(mig9Twice) === JSON.stringify(mig9));
 
+  /* ---- PR-2: sessions are the source of truth for progression (0.2 + 0.3) ---- */
+  const curlDef = { name: "Dumbbell Curl", metric: "reps", loaded: true, targetSets: 3, targetReps: 10, targetRepsMax: 14 };
+  const pullDef = { name: "Pull-Up", metric: "reps", loaded: false, targetSets: 3, targetReps: 8 };
+  const snap = (...defs) => ({ isCardio: false, exercises: defs });
+  const sess = (date, defs, exercises) => ({ id: date, date, dayLabel: "Upper", templateId: "upperA", templateSnapshot: snap(...defs), exercises });
+  const sets = (...pairs) => pairs.map(([reps, weight]) => ({ reps, weight: weight == null ? null : weight, cadenceMs: null }));
+  const withSessions = (list) => Object.assign(L.freshState(), { sessions: JSON.parse(JSON.stringify(list)), exercises: {} });
+
+  // 0.2: a partial session today must not become its own "last time".
+  const priorCurl = sess("2026-09-21", [curlDef], [{ name: "Dumbbell Curl", metric: "reps", loaded: true, sets: sets([12, 20], [12, 20], [12, 20]) }]);
+  const todayCurl = sess("2026-09-24", [curlDef], [{ name: "Dumbbell Curl", metric: "reps", loaded: true, sets: sets([16, 20]) }]);
+  const priorOnly = withSessions([priorCurl]);
+  const priorPlusPartial = withSessions([priorCurl, todayCurl]);
+  const sugAlone = L.buildExerciseViewModel(curlDef, null, L.deriveCatalog(priorOnly, { before: "2026-09-24" })).suggestion;
+  const sugPartial = L.buildExerciseViewModel(curlDef, priorPlusPartial.sessions[1], L.deriveCatalog(priorPlusPartial, { before: "2026-09-24" })).suggestion;
+  check("0.2: a partial session today leaves today's suggestion unchanged", JSON.stringify(sugAlone) === JSON.stringify(sugPartial) && sugAlone.reps === 13 && sugAlone.weight === 20);
+  check("0.2: with no earlier session the note is \"no history\"", L.buildExerciseViewModel(curlDef, todayCurl, L.deriveCatalog(withSessions([todayCurl]), { before: "2026-09-24" })).suggestion.note === "no history");
+  check("lastPerfBefore returns the heaviest weight and worst set of the newest earlier session", JSON.stringify(L.lastPerfBefore(priorPlusPartial, "Dumbbell Curl", "2026-09-24")) === JSON.stringify({ weight: 20, reps: 12 }));
+  check("lastPerfBefore is null with nothing earlier", L.lastPerfBefore(priorPlusPartial, "Dumbbell Curl", "2026-09-21") === null);
+
+  // 0.3: editing an older day must not rewrite current progression.
+  const monPull = sess("2026-09-21", [pullDef], [{ name: "Pull-Up", metric: "reps", loaded: false, sets: sets([12], [12], [12]) }]);
+  const wedPull = sess("2026-09-23", [pullDef], [{ name: "Pull-Up", metric: "reps", loaded: false, sets: sets([10], [10], [10]) }]);
+  const editedOld = withSessions([wedPull, monPull]); // stored out of order on purpose
+  editedOld.sessions[1].exercises[0].sets[0].reps = 5;
+  const editedEntry = L.deriveCatalogEntry(editedOld, "Pull-Up");
+  check("0.3: editing an older session doesn't change lastReps when a newer one exists", editedEntry.lastReps === 10);
+  check("0.3: a newer hit clears the miss the edited old day now shows", editedEntry.missStreak === 0);
+  const clearedNewest = withSessions([monPull, wedPull]);
+  clearedNewest.sessions[1].exercises[0].sets.forEach((st) => { st.reps = null; });
+  check("0.3: clearing every set of the newest session falls back to the one before it", L.deriveCatalogEntry(clearedNewest, "Pull-Up").lastReps === 12);
+  const clearedAll = withSessions([monPull]);
+  clearedAll.sessions[0].exercises[0].sets.forEach((st) => { st.reps = null; });
+  check("no filled sets anywhere derives no entry", L.deriveCatalogEntry(clearedAll, "Pull-Up") === null);
+
+  // missStreak replay.
+  const rowDef = { name: "Dumbbell Row", metric: "reps", loaded: true, targetSets: 3, targetReps: 10 };
+  const rowSess = (date, reps, def) => sess(date, def === null ? [] : [def || rowDef], [{ name: "Dumbbell Row", metric: "reps", loaded: true, sets: sets(...reps.map((r) => [r, 25])) }]);
+  const hmm = withSessions([rowSess("2026-09-01", [10, 10, 10]), rowSess("2026-09-03", [8, 8, 8]), rowSess("2026-09-05", [9, 9, 9])]);
+  check("missStreak after hit, miss, miss equals 2", L.deriveCatalogEntry(hmm, "Dumbbell Row").missStreak === 2);
+  const partialMiss = withSessions([rowSess("2026-09-01", [8, 8, 8]), rowSess("2026-09-03", [6])]);
+  check("an incomplete session doesn't move missStreak", L.deriveCatalogEntry(partialMiss, "Dumbbell Row").missStreak === 1);
+  const legacyNoSnap = rowSess("2026-09-03", [7, 7, 7]); delete legacyNoSnap.templateSnapshot;
+  const withLegacy = withSessions([rowSess("2026-09-01", [8, 8, 8]), legacyNoSnap]);
+  check("a session with no snapshot can't be judged, so it leaves missStreak alone (no invented deload)", L.deriveCatalogEntry(withLegacy, "Dumbbell Row").missStreak === 1 && L.deriveCatalogEntry(withLegacy, "Dumbbell Row").lastReps === 7);
+  const snapTarget = withSessions([rowSess("2026-09-01", [9, 9, 9], Object.assign({}, rowDef, { targetReps: 8 }))]);
+  check("missStreak judges a day by its own snapshot target, not today's template", L.deriveCatalogEntry(snapTarget, "Dumbbell Row").missStreak === 0);
+  const customSess = (date, reps) => ({ id: date, date, dayLabel: "Rest", templateSnapshot: null, exercises: [{ name: "Farmer Carry", isCustom: true, metric: "seconds", loaded: false, sets: sets(...reps.map((r) => [r])) }] });
+  const customRun = withSessions([customSess("2026-09-01", [40, 40]), customSess("2026-09-03", [35, 40])]);
+  check("a custom exercise's target is its own previous result", L.deriveCatalogEntry(customRun, "Farmer Carry").missStreak === 1 && L.deriveCatalogEntry(withSessions([customSess("2026-09-01", [40, 40])]), "Farmer Carry").missStreak === 0);
+  check("deriveCatalog with `before` excludes that day and later", L.deriveCatalogEntry(hmm, "Dumbbell Row", { before: "2026-09-03" }).missStreak === 0 && L.deriveCatalogEntry(hmm, "Dumbbell Row", { before: "2026-09-03" }).lastReps === 10);
+
+  // Bests come from every session; PRs compare against the best before the day.
+  check("bests are the maximum over all sessions", (() => { const e = L.deriveCatalogEntry(priorPlusPartial, "Dumbbell Curl"); return e.bestWeight === 20 && e.bestReps === 16 && e.bestE1RM === Math.round(L.estimate1RM(20, 16)); })());
+  const curlPrior = L.deriveCatalogEntry(priorOnly, "Dumbbell Curl");
+  check("countSessionPRs: a set beating the prior estimated 1RM counts", L.countSessionPRs(sets([13, 20], [12, 20], [12, 20]), curlPrior) === 1);
+  check("countSessionPRs: matching the prior best is not a PR", L.countSessionPRs(sets([12, 20], [12, 20], [12, 20]), curlPrior) === 0);
+  check("countSessionPRs: a first-ever log has nothing to beat", L.countSessionPRs(sets([12, 20]), null) === 0);
+  check("countSessionPRs: bodyweight is judged on reps", L.countSessionPRs(sets([13], [11]), L.deriveCatalogEntry(withSessions([monPull]), "Pull-Up")) === 1);
+  check("PR detection still fires once this session is in the cache (prior is taken before the day)", L.countSessionPRs(sets([16, 20]), L.deriveCatalogEntry(priorPlusPartial, "Dumbbell Curl", { before: "2026-09-24" })) === 1);
+
+  // The rebuild is a cache rewrite: safe, idempotent, order-preserving, v9-aware.
+  const rebuildState = withSessions([monPull, wedPull, priorCurl]);
+  rebuildState.exercises = {
+    "Pull-Up": { name: "Pull-Up", lastReps: 5, lastWeight: 0, missStreak: 3, loaded: false, updatedAt: "2026-09-10T00:00:00.000Z" },
+    "Dumbbell Curl": { name: "Dumbbell Curl", lastReps: 1, lastWeight: 99, loaded: true, updatedAt: "2026-09-20T00:00:00.000Z" },
+    "Old Lift": { name: "Old Lift", lastReps: 6, lastWeight: 50, updatedAt: "2026-08-01T00:00:00.000Z" }
+  };
+  const sessionsBefore = JSON.stringify(rebuildState.sessions);
+  const orderBefore = L.listLoggedExercises(rebuildState).join(",");
+  const rebuilt = L.rebuildExerciseCatalog(rebuildState);
+  check("rebuild corrects skewed entries from sessions", rebuilt["Pull-Up"].lastReps === 10 && rebuilt["Pull-Up"].missStreak === 0 && rebuilt["Dumbbell Curl"].lastWeight === 20);
+  check("rebuild keeps entries that have no sessions behind them", rebuilt["Old Lift"].lastWeight === 50);
+  check("rebuild never touches sessions", JSON.stringify(rebuildState.sessions) === sessionsBefore);
+  check("rebuild keeps the Progress list order (updatedAt preserved)", L.listLoggedExercises(Object.assign({}, rebuildState, { exercises: rebuilt })).join(",") === orderBefore);
+  const rebuiltTwice = L.rebuildExerciseCatalog(Object.assign({}, rebuildState, { exercises: rebuilt }));
+  check("rebuild is idempotent", JSON.stringify(rebuiltTwice) === JSON.stringify(rebuilt));
+  check("a new entry's updatedAt comes from its newest session date", L.rebuildExerciseCatalog(withSessions([wedPull]))["Pull-Up"].updatedAt === "2026-09-23T00:00:00.000Z");
+
+  const v9Then = JSON.parse(JSON.stringify(v8Weightless));
+  v9Then.sessions[0].exercises[0].loaded = true; // old sessions recorded the weighted flag
+  const v9Migrated = L.migrate(v9Then);
+  check("rebuild after v9 doesn't turn Pull-Up back into a weighted exercise", L.rebuildExerciseCatalog(v9Migrated)["Pull-Up"].loaded === false);
+  const weightedPull = JSON.parse(JSON.stringify(v9Migrated));
+  weightedPull.sessions[0].exercises[0].sets = [{ reps: 5, weight: 25 }];
+  check("rebuild marks an exercise weighted once any weight was logged", L.rebuildExerciseCatalog(weightedPull)["Pull-Up"].loaded === true);
+  const unweightedNow = withSessions([sess("2026-09-01", [curlDef], [{ name: "Dumbbell Curl", metric: "reps", loaded: true, sets: sets([10, 20]) }]), sess("2026-09-03", [], [{ name: "Dumbbell Curl", isCustom: true, metric: "reps", loaded: false, sets: sets([10]) }])]);
+  check("an explicit loaded:false on the newest log wins", L.rebuildExerciseCatalog(unweightedNow)["Dumbbell Curl"].loaded === false);
+
+  // The DOM layer reads suggestions through the derived catalog, not the cache.
+  const todaySrc = html.slice(html.indexOf("function renderTodayContent"), html.indexOf("function renderCustomExerciseCards"));
+  check("Today builds suggestions from history before the viewed day", /deriveCatalog\(state, \{ before: vm\.dateKey \}\)/.test(todaySrc) && !/buildExerciseViewModel\([^)]*state\.exercises/.test(todaySrc));
+  check("the incremental catalog updater is gone", html.indexOf("function updateExerciseCatalog") === -1);
+
   /* ---- summary ---- */
   console.log("\n" + passes + " passed, " + failures + " failed.");
   if (failures > 0) process.exit(1);
