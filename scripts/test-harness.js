@@ -43,6 +43,14 @@ function extractScripts(html) {
   return scripts;
 }
 
+// Since schema v10 the bank and progress catalog are keyed by exercise id;
+// tests refer to exercises by name, so look entries up either way.
+function byName(map, name) {
+  if (!map) return undefined;
+  if (Object.prototype.hasOwnProperty.call(map, name)) return map[name];
+  return Object.keys(map).map((k) => map[k]).find((e) => e && e.name === name);
+}
+
 function nodeCheckAll(scripts) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "train-harness-"));
   scripts.forEach((src, i) => {
@@ -334,13 +342,13 @@ async function main() {
   };
   const fromV2 = L.migrate(v2Blob);
   check("v2->v3 migration stamps current schema version", fromV2.schemaVersion === L.SCHEMA_VERSION);
-  check("v2->v3 migration preserves existing catalog data", fromV2.exercises["Farmer Carry"].lastWeight === 40);
-  check("v2->v3 migration infers loaded=true when bestWeight was ever > 0", fromV2.exercises["Farmer Carry"].loaded === true);
-  check("v2->v3 migration infers loaded=false when bestWeight was never > 0", fromV2.exercises["Wall Sit"].loaded === false);
-  check("v2->v3 migration defaults metric to reps", fromV2.exercises["Farmer Carry"].metric === "reps");
-  check("v2->v3 migration adds lastSetCount as null (unknown)", fromV2.exercises["Farmer Carry"].lastSetCount === null);
+  check("v2->v3 migration preserves existing catalog data", byName(fromV2.exercises, "Farmer Carry").lastWeight === 40);
+  check("v2->v3 migration infers loaded=true when bestWeight was ever > 0", byName(fromV2.exercises, "Farmer Carry").loaded === true);
+  check("v2->v3 migration infers loaded=false when bestWeight was never > 0", byName(fromV2.exercises, "Wall Sit").loaded === false);
+  check("v2->v3 migration defaults metric to reps", byName(fromV2.exercises, "Farmer Carry").metric === "reps");
+  check("v2->v3 migration adds lastSetCount as null (unknown)", byName(fromV2.exercises, "Farmer Carry").lastSetCount === null);
   check("v2 blob also chains through v3->v4, adding ownedWeights", Array.isArray(fromV2.ownedWeights));
-  check("v2 blob's catalog gets a bestE1RM even with no session history (0)", fromV2.exercises["Farmer Carry"].bestE1RM === 0);
+  check("v2 blob's catalog gets a bestE1RM even with no session history (0)", byName(fromV2.exercises, "Farmer Carry").bestE1RM === 0);
 
   // A v3 blob (real weighted session history, but catalog entries predate
   // bestE1RM) should backfill bestE1RM by rescanning that history -- not by
@@ -362,12 +370,12 @@ async function main() {
   const fromV3 = L.migrate(v3Blob);
   check("v3->v4 migration stamps current schema version", fromV3.schemaVersion === L.SCHEMA_VERSION);
   const expectedE1RM = Math.round(30 * (1 + 12 / 30)); // best session was 30lb x12
-  check("v3->v4 migration backfills bestE1RM from session history", fromV3.exercises["Goblet Squat"].bestE1RM === expectedE1RM);
-  check("v3->v4 migration preserves existing catalog fields", fromV3.exercises["Goblet Squat"].lastWeight === 30);
+  check("v3->v4 migration backfills bestE1RM from session history", byName(fromV3.exercises, "Goblet Squat").bestE1RM === expectedE1RM);
+  check("v3->v4 migration preserves existing catalog fields", byName(fromV3.exercises, "Goblet Squat").lastWeight === 30);
   check("v3->v4 migration defaults ownedWeights to an empty array", Array.isArray(fromV3.ownedWeights) && fromV3.ownedWeights.length === 0);
   // The chain doesn't stop at v4 either -- it continues straight through
   // to v5, backfilling missStreak and deloadWeeks on the same blob.
-  check("a v3 blob also chains through v4->v5, backfilling missStreak", fromV3.exercises["Goblet Squat"].missStreak === 0);
+  check("a v3 blob also chains through v4->v5, backfilling missStreak", byName(fromV3.exercises, "Goblet Squat").missStreak === 0);
   check("a v3 blob also chains through v4->v5, defaulting deloadWeeks", fromV3.deloadWeeks && typeof fromV3.deloadWeeks === "object");
 
   // A v4 blob (schemaVersion:4, catalog entries with bestE1RM but no
@@ -385,8 +393,8 @@ async function main() {
   };
   const fromV4 = L.migrate(v4Blob);
   check("v4->v5 migration stamps current schema version", fromV4.schemaVersion === L.SCHEMA_VERSION);
-  check("v4->v5 migration backfills missStreak at 0", fromV4.exercises["Goblet Squat"].missStreak === 0);
-  check("v4->v5 migration preserves existing catalog fields", fromV4.exercises["Goblet Squat"].bestE1RM === 42);
+  check("v4->v5 migration backfills missStreak at 0", byName(fromV4.exercises, "Goblet Squat").missStreak === 0);
+  check("v4->v5 migration preserves existing catalog fields", byName(fromV4.exercises, "Goblet Squat").bestE1RM === 42);
   check("v4->v5 migration defaults deloadWeeks to an empty object", fromV4.deloadWeeks && Object.keys(fromV4.deloadWeeks).length === 0);
   check("v4->v5 migration preserves other top-level fields", fromV4.ownedWeights.length === 3 && fromV4.longestStreak === 8);
 
@@ -394,7 +402,7 @@ async function main() {
   // auto EXCEPT when baselines were already customized away from the
   // defaults before this feature existed -- that's a deliberate manual
   // choice already made and shouldn't be silently overridden on upgrade.
-  const v5BlobDefaultBaselines = Object.assign({}, v4Blob, { schemaVersion: 5, deloadWeeks: {}, exercises: { "Goblet Squat": Object.assign({}, v4Blob.exercises["Goblet Squat"], { missStreak: 1 }) } });
+  const v5BlobDefaultBaselines = Object.assign({}, v4Blob, { schemaVersion: 5, deloadWeeks: {}, exercises: { "Goblet Squat": Object.assign({}, byName(v4Blob.exercises, "Goblet Squat"), { missStreak: 1 }) } });
   const fromV5Default = L.migrate(v5BlobDefaultBaselines);
   check("v5->v6 migration defaults to auto baselines when unchanged from defaults", fromV5Default.baselinesAuto === true);
 
@@ -1008,39 +1016,39 @@ async function main() {
 
   /* ---- exercise bank ---- */
   const freshBank = L.freshState().exerciseBank;
-  check("a fresh account's bank includes the built-in exercises", !!freshBank["Burpee"] && freshBank["Burpee"].category === "Conditioning");
-  check("a fresh account's bank includes every default-template exercise", L.getTemplateIds(L.freshState()).every((id) => (L.WORKOUT_TEMPLATES[id].exercises || []).every((e) => !!freshBank[e.name])));
+  check("a fresh account's bank includes the built-in exercises", !!byName(freshBank, "Burpee") && byName(freshBank, "Burpee").category === "Conditioning");
+  check("a fresh account's bank includes every default-template exercise", L.getTemplateIds(L.freshState()).every((id) => (L.WORKOUT_TEMPLATES[id].exercises || []).every((e) => !!byName(freshBank, e.name))));
   check("every built-in bank entry has one of the five categories", L.DEFAULT_EXERCISE_BANK.every((e) => L.EXERCISE_CATEGORIES.indexOf(e.category) !== -1));
 
   const seededState = L.freshState();
   seededState.exerciseBank = undefined;
   seededState.exercises = { "Sled Push": { name: "Sled Push", metric: "reps", loaded: true, lastSetCount: 4, lastReps: 8 } };
   const seeded = L.seedExerciseBank(seededState);
-  check("seedExerciseBank pulls in logged-only exercises, uncategorized", seeded["Sled Push"] && seeded["Sled Push"].category === null && seeded["Sled Push"].targetSets === 4);
+  check("seedExerciseBank pulls in logged-only exercises, uncategorized", byName(seeded, "Sled Push") && byName(seeded, "Sled Push").category === null && byName(seeded, "Sled Push").targetSets === 4);
 
   const kept = L.addMissingToBank({ "Push-Up": { name: "Push-Up", category: "Push", metric: "reps", loaded: true, targetSets: 5, targetReps: 25 } }, [{ name: "Push-Up", targetSets: 1, targetReps: 1 }]);
-  check("addMissingToBank never overwrites an existing entry", kept["Push-Up"].targetSets === 5);
+  check("addMissingToBank never overwrites an existing entry", byName(kept, "Push-Up").targetSets === 5);
   const withBuiltinCat = L.addMissingToBank({}, [{ name: "Goblet Squat", metric: "reps", loaded: true, targetSets: 2, targetReps: 8 }]);
-  check("addMissingToBank takes the category from the built-in list, defaults from the def", withBuiltinCat["Goblet Squat"].category === "Legs" && withBuiltinCat["Goblet Squat"].targetSets === 2);
+  check("addMissingToBank takes the category from the built-in list, defaults from the def", byName(withBuiltinCat, "Goblet Squat").category === "Legs" && byName(withBuiltinCat, "Goblet Squat").targetSets === 2);
 
   const legsCore = L.filterExerciseBank(freshBank, "", ["Legs", "Core"]);
   check("filterExerciseBank narrows by category", legsCore.length > 0 && legsCore.every((e) => e.category === "Legs" || e.category === "Core"));
   check("filterExerciseBank sorts by category order then name", legsCore[0].category === "Legs");
   check("filterExerciseBank matches a search query case-insensitively", L.filterExerciseBank(freshBank, "PLANK", []).map((e) => e.name).indexOf("Side Plank") !== -1);
 
-  const templateDef = L.bankEntryToTemplateDef(freshBank["Goblet Squat"]);
+  const templateDef = L.bankEntryToTemplateDef(byName(freshBank, "Goblet Squat"));
   check("bankEntryToTemplateDef copies defaults (not category) into a workout exercise", templateDef.targetRepsMax === 20 && templateDef.category === undefined);
 
   check("upsertBankEntry rejects an entry with no name", L.upsertBankEntry(freshBank, { name: "  " }) === null);
   const upserted = L.upsertBankEntry(freshBank, { name: "Farmer Carry", category: "Conditioning", metric: "seconds", loaded: true, targetSets: 3, targetReps: 40 });
-  check("upsertBankEntry adds a new entry without mutating the source bank", upserted.bank["Farmer Carry"].category === "Conditioning" && !freshBank["Farmer Carry"]);
+  check("upsertBankEntry adds a new entry without mutating the source bank", byName(upserted.bank, "Farmer Carry").category === "Conditioning" && !byName(freshBank, "Farmer Carry"));
   check("upsertBankEntry drops an unknown category to uncategorized", L.upsertBankEntry(freshBank, { name: "X", category: "Arms", targetSets: 3, targetReps: 10 }).entry.category === null);
-  check("removeBankEntry removes without mutating", !L.removeBankEntry(freshBank, "Burpee")["Burpee"] && !!freshBank["Burpee"]);
+  check("removeBankEntry removes without mutating", !byName(L.removeBankEntry(freshBank, "Burpee"), "Burpee") && !!byName(freshBank, "Burpee"));
   check("setTemplateFocus keeps only valid, unique categories", L.setTemplateFocus({ exercises: [] }, ["Legs", "Arms", "Legs", "Core"]).focus.join(",") === "Legs,Core");
 
   /* ---- exercise descriptions ---- */
   check("every built-in bank entry has a short how-to description", L.DEFAULT_EXERCISE_BANK.every((e) => typeof e.description === "string" && e.description.length > 0 && e.description.length <= L.MAX_DESCRIPTION_LENGTH));
-  check("bankEntryToTemplateDef copies the description into a workout exercise", L.bankEntryToTemplateDef(freshBank["Goblet Squat"]).description === freshBank["Goblet Squat"].description);
+  check("bankEntryToTemplateDef copies the description into a workout exercise", L.bankEntryToTemplateDef(byName(freshBank, "Goblet Squat")).description === byName(freshBank, "Goblet Squat").description);
   const longDescEntry = L.upsertBankEntry(freshBank, { name: "Y", category: "Core", targetSets: 3, targetReps: 10, description: "  " + "x".repeat(L.MAX_DESCRIPTION_LENGTH + 40) + "  " }).entry;
   check("a description is trimmed and capped at MAX_DESCRIPTION_LENGTH", longDescEntry.description.length === L.MAX_DESCRIPTION_LENGTH && !/^\s|\s$/.test(longDescEntry.description));
   check("a blank description is dropped rather than stored empty", L.upsertBankEntry(freshBank, { name: "Z", category: "Core", targetSets: 3, targetReps: 10, description: "   " }).entry.description === undefined);
@@ -1053,7 +1061,7 @@ async function main() {
   v6Blob.templates = L.cloneTemplates(L.WORKOUT_TEMPLATES);
   v6Blob.templates.upperA.exercises.push({ name: "Band Pull-Apart", metric: "reps", loaded: false, targetSets: 3, targetReps: 20 });
   const fromV6 = L.migrate(v6Blob);
-  check("v6->v7 migration seeds the bank, including custom template exercises", fromV6.schemaVersion === L.SCHEMA_VERSION && !!fromV6.exerciseBank["Band Pull-Apart"] && !!fromV6.exerciseBank["Burpee"]);
+  check("v6->v7 migration seeds the bank, including custom template exercises", fromV6.schemaVersion === L.SCHEMA_VERSION && !!byName(fromV6.exerciseBank, "Band Pull-Apart") && !!byName(fromV6.exerciseBank, "Burpee"));
 
   /* ---- starter plan through the real import path ---- */
   const starter = L.STARTER_PLANS[0];
@@ -1065,7 +1073,7 @@ async function main() {
   check("diffPlanChanges shows a focus change", L.diffPlanChanges(starterState, parsedStarter.payload).some((d) => d.templateId === "lower" && d.lines.some((l) => l.indexOf("Focus:") === 0)));
   const appliedStarter = L.applyPlanChanges(starterState, parsedStarter.payload);
   check("applying the starter plan creates Explosive Power with its focus", appliedStarter.templates.explosive.label === "Explosive Power" && appliedStarter.templates.explosive.focus.join(",") === "Conditioning,Core");
-  check("applying a plan adds its exercises back into the bank", !!appliedStarter.exerciseBank["Jump Rope"] && appliedStarter.exerciseBank["Jump Rope"].category === "Conditioning");
+  check("applying a plan adds its exercises back into the bank", !!byName(appliedStarter.exerciseBank, "Jump Rope") && byName(appliedStarter.exerciseBank, "Jump Rope").category === "Conditioning");
   check("applying the starter plan sets Wed/Sun rest days", appliedStarter.restDays.join(",") === "0,3");
 
   /* ---- share links ---- */
@@ -1094,7 +1102,7 @@ async function main() {
   const receivedParse = L.parsePlanChangePayload(JSON.stringify(decoded), receiver);
   check("a received plan parses with no warnings", receivedParse.valid && receivedParse.errors.length === 0);
   const received = L.applyPlanChanges(receiver, receivedParse.payload);
-  check("a received custom exercise lands in the bank with its category", received.exerciseBank["Wall Sit"] && received.exerciseBank["Wall Sit"].category === "Legs");
+  check("a received custom exercise lands in the bank with its category", byName(received.exerciseBank, "Wall Sit") && byName(received.exerciseBank, "Wall Sit").category === "Legs");
   check("a received plan recreates the sender's workouts and week", received.templates.explosive.label === "Explosive Power" && received.weekPlan[4] === "explosive" && received.restDays.join(",") === "0,3");
 
   let damagedError = null;
@@ -1190,7 +1198,7 @@ async function main() {
   v7Blob.exerciseBank = L.removeBankEntry(L.removeBankEntry(v7Blob.exerciseBank, "Bird Dog"), "Burpee");
   const fromV7 = L.migrate(v7Blob);
   check("v7->v8: an existing account is marked onboarded (no intro)", fromV7.onboarded === true && fromV7.profile === null && fromV7.schemaVersion === L.SCHEMA_VERSION);
-  check("v7->v8: adds the new bank exercises without restoring ones the user removed", !!fromV7.exerciseBank["Bird Dog"] && !fromV7.exerciseBank["Burpee"]);
+  check("v7->v8: adds the new bank exercises without restoring ones the user removed", !!byName(fromV7.exerciseBank, "Bird Dog") && !byName(fromV7.exerciseBank, "Burpee"));
   check("a brand-new install starts un-onboarded", L.freshState().onboarded === false);
 
   const introState = L.freshState();
@@ -1262,7 +1270,7 @@ async function main() {
 
   const bwNames = ["Pull-Up", "Push-Up", "Tricep Dip", "Chin-Up"];
   const fresh9 = L.freshState();
-  check("fresh install: the four bodyweight moves are unweighted in the bank", bwNames.every((n) => fresh9.exerciseBank[n].loaded === false));
+  check("fresh install: the four bodyweight moves are unweighted in the bank", bwNames.every((n) => byName(fresh9.exerciseBank, n).loaded === false));
   check("fresh install: default workouts list them unweighted", Object.keys(fresh9.templates).every((id) => (fresh9.templates[id].exercises || []).every((e) => bwNames.indexOf(e.name) === -1 || e.loaded === false)));
 
   const owned = [10, 15, 20, 25, 30, 35];
@@ -1281,24 +1289,24 @@ async function main() {
     { name: "Pull-Up", metric: "reps", loaded: true, targetSets: 4, targetReps: 8, targetRepsMax: 12 },
     { name: "Dumbbell Row", metric: "reps", loaded: true, targetSets: 3, targetReps: 10 }
   ];
-  v8Weightless.exerciseBank["Pull-Up"] = Object.assign({}, v8Weightless.exerciseBank["Pull-Up"], { loaded: true, targetRepsMax: 12 });
-  v8Weightless.exerciseBank["Chin-Up"] = Object.assign({}, v8Weightless.exerciseBank["Chin-Up"], { loaded: true });
+  v8Weightless.exerciseBank["pull-up"] = Object.assign({}, byName(v8Weightless.exerciseBank, "pull-up"), { loaded: true, targetRepsMax: 12 });
+  v8Weightless.exerciseBank["chin-up"] = Object.assign({}, byName(v8Weightless.exerciseBank, "chin-up"), { loaded: true });
   v8Weightless.exercises = { "Pull-Up": { name: "Pull-Up", loaded: true, bestWeight: 0, lastReps: 8, lastWeight: 0 } };
   const frozenSnapshot = { isCardio: false, exercises: [{ name: "Pull-Up", metric: "reps", loaded: true, targetSets: 4, targetReps: 8 }] };
   v8Weightless.sessions = [{ id: 1, date: "2026-09-21", dayLabel: "Upper", templateId: "upperA", templateSnapshot: frozenSnapshot, exercises: [{ name: "Pull-Up", sets: [{ reps: 8, weight: 0 }, { reps: 7, weight: 0 }] }] }];
   const mig9 = L.migrate(JSON.parse(JSON.stringify(v8Weightless)));
-  check("v8->v9: stamps the current schema version", mig9.schemaVersion === L.SCHEMA_VERSION && L.SCHEMA_VERSION === 9);
-  check("v8->v9: an unlogged-weight Pull-Up becomes unweighted in the workout, bank and catalog", mig9.templates.upperA.exercises[0].loaded === false && mig9.exerciseBank["Pull-Up"].loaded === false && mig9.exercises["Pull-Up"].loaded === false);
-  check("v8->v9: the now-meaningless rep ceiling is dropped with the flag", mig9.templates.upperA.exercises[0].targetRepsMax === undefined && mig9.exerciseBank["Pull-Up"].targetRepsMax === undefined);
-  check("v8->v9: a never-logged Chin-Up is flipped too", mig9.exerciseBank["Chin-Up"].loaded === false);
+  check("v8->v9: stamps the current schema version", mig9.schemaVersion === L.SCHEMA_VERSION && L.SCHEMA_VERSION >= 9);
+  check("v8->v9: an unlogged-weight Pull-Up becomes unweighted in the workout, bank and catalog", mig9.templates.upperA.exercises[0].loaded === false && byName(mig9.exerciseBank, "Pull-Up").loaded === false && byName(mig9.exercises, "Pull-Up").loaded === false);
+  check("v8->v9: the now-meaningless rep ceiling is dropped with the flag", mig9.templates.upperA.exercises[0].targetRepsMax === undefined && byName(mig9.exerciseBank, "Pull-Up").targetRepsMax === undefined);
+  check("v8->v9: a never-logged Chin-Up is flipped too", byName(mig9.exerciseBank, "Chin-Up").loaded === false);
   check("v8->v9: other exercises are left weighted", mig9.templates.upperA.exercises[1].loaded === true);
-  check("v8->v9: logged sessions and their frozen snapshots are untouched", JSON.stringify(mig9.sessions[0].templateSnapshot) === JSON.stringify(frozenSnapshot) && mig9.sessions[0].exercises[0].sets.length === 2);
+  check("v8->v9: logged sessions and their frozen snapshots are untouched (v10 only adds ids)", JSON.stringify(mig9.sessions[0].templateSnapshot, (k, v) => (k === "id" ? undefined : v)) === JSON.stringify(frozenSnapshot) && mig9.sessions[0].exercises[0].sets.length === 2);
 
   const v8Weighted = JSON.parse(JSON.stringify(v8Weightless));
   v8Weighted.sessions[0].exercises[0].sets = [{ reps: 5, weight: 25 }];
   const mig9Weighted = L.migrate(v8Weighted);
-  check("v8->v9: a Pull-Up that ever had a weight logged keeps its weighted flag everywhere", mig9Weighted.templates.upperA.exercises[0].loaded === true && mig9Weighted.exerciseBank["Pull-Up"].loaded === true && mig9Weighted.exercises["Pull-Up"].loaded === true);
-  check("v8->v9: that account's other never-weighted moves still flip (Chin-Up)", mig9Weighted.exerciseBank["Chin-Up"].loaded === false);
+  check("v8->v9: a Pull-Up that ever had a weight logged keeps its weighted flag everywhere", mig9Weighted.templates.upperA.exercises[0].loaded === true && byName(mig9Weighted.exerciseBank, "Pull-Up").loaded === true && byName(mig9Weighted.exercises, "Pull-Up").loaded === true);
+  check("v8->v9: that account's other never-weighted moves still flip (Chin-Up)", byName(mig9Weighted.exerciseBank, "Chin-Up").loaded === false);
   const mig9Twice = L.migrate(JSON.parse(JSON.stringify(mig9)));
   check("v8->v9: re-migrating an already-current state is a no-op", JSON.stringify(mig9Twice) === JSON.stringify(mig9));
 
@@ -1371,30 +1379,148 @@ async function main() {
     "Old Lift": { name: "Old Lift", lastReps: 6, lastWeight: 50, updatedAt: "2026-08-01T00:00:00.000Z" }
   };
   const sessionsBefore = JSON.stringify(rebuildState.sessions);
-  const orderBefore = L.listLoggedExercises(rebuildState).join(",");
+  const orderBefore = L.listLoggedExercises(rebuildState).map((k) => L.exerciseDisplayName(rebuildState, k)).join(",");
   const rebuilt = L.rebuildExerciseCatalog(rebuildState);
-  check("rebuild corrects skewed entries from sessions", rebuilt["Pull-Up"].lastReps === 10 && rebuilt["Pull-Up"].missStreak === 0 && rebuilt["Dumbbell Curl"].lastWeight === 20);
-  check("rebuild keeps entries that have no sessions behind them", rebuilt["Old Lift"].lastWeight === 50);
+  check("rebuild corrects skewed entries from sessions", byName(rebuilt, "Pull-Up").lastReps === 10 && byName(rebuilt, "Pull-Up").missStreak === 0 && byName(rebuilt, "Dumbbell Curl").lastWeight === 20);
+  check("rebuild keeps entries that have no sessions behind them", byName(rebuilt, "Old Lift").lastWeight === 50);
   check("rebuild never touches sessions", JSON.stringify(rebuildState.sessions) === sessionsBefore);
-  check("rebuild keeps the Progress list order (updatedAt preserved)", L.listLoggedExercises(Object.assign({}, rebuildState, { exercises: rebuilt })).join(",") === orderBefore);
+  check("rebuild keeps the Progress list order (updatedAt preserved)", (() => { const after = Object.assign({}, rebuildState, { exercises: rebuilt }); return L.listLoggedExercises(after).map((k) => L.exerciseDisplayName(after, k)).join(",") === orderBefore; })());
   const rebuiltTwice = L.rebuildExerciseCatalog(Object.assign({}, rebuildState, { exercises: rebuilt }));
   check("rebuild is idempotent", JSON.stringify(rebuiltTwice) === JSON.stringify(rebuilt));
-  check("a new entry's updatedAt comes from its newest session date", L.rebuildExerciseCatalog(withSessions([wedPull]))["Pull-Up"].updatedAt === "2026-09-23T00:00:00.000Z");
+  check("a new entry's updatedAt comes from its newest session date", byName(L.rebuildExerciseCatalog(withSessions([wedPull])), "Pull-Up").updatedAt === "2026-09-23T00:00:00.000Z");
 
   const v9Then = JSON.parse(JSON.stringify(v8Weightless));
   v9Then.sessions[0].exercises[0].loaded = true; // old sessions recorded the weighted flag
   const v9Migrated = L.migrate(v9Then);
-  check("rebuild after v9 doesn't turn Pull-Up back into a weighted exercise", L.rebuildExerciseCatalog(v9Migrated)["Pull-Up"].loaded === false);
+  check("rebuild after v9 doesn't turn Pull-Up back into a weighted exercise", byName(L.rebuildExerciseCatalog(v9Migrated), "Pull-Up").loaded === false);
   const weightedPull = JSON.parse(JSON.stringify(v9Migrated));
   weightedPull.sessions[0].exercises[0].sets = [{ reps: 5, weight: 25 }];
-  check("rebuild marks an exercise weighted once any weight was logged", L.rebuildExerciseCatalog(weightedPull)["Pull-Up"].loaded === true);
+  check("rebuild marks an exercise weighted once any weight was logged", byName(L.rebuildExerciseCatalog(weightedPull), "Pull-Up").loaded === true);
   const unweightedNow = withSessions([sess("2026-09-01", [curlDef], [{ name: "Dumbbell Curl", metric: "reps", loaded: true, sets: sets([10, 20]) }]), sess("2026-09-03", [], [{ name: "Dumbbell Curl", isCustom: true, metric: "reps", loaded: false, sets: sets([10]) }])]);
-  check("an explicit loaded:false on the newest log wins", L.rebuildExerciseCatalog(unweightedNow)["Dumbbell Curl"].loaded === false);
+  check("an explicit loaded:false on the newest log wins", byName(L.rebuildExerciseCatalog(unweightedNow), "Dumbbell Curl").loaded === false);
 
   // The DOM layer reads suggestions through the derived catalog, not the cache.
   const todaySrc = html.slice(html.indexOf("function renderTodayContent"), html.indexOf("function renderCustomExerciseCards"));
   check("Today builds suggestions from history before the viewed day", /deriveCatalog\(state, \{ before: vm\.dateKey \}\)/.test(todaySrc) && !/buildExerciseViewModel\([^)]*state\.exercises/.test(todaySrc));
   check("the incremental catalog updater is gone", html.indexOf("function updateExerciseCatalog") === -1);
+
+  /* ---- PR-3a: stable exercise ids (5.1) ---- */
+  // A v9-shaped account: bank and catalog keyed by name, nothing has an id.
+  const v9Def = (name, extra) => Object.assign({ name, metric: "reps", loaded: false, targetSets: 2, targetReps: 8 }, extra || {});
+  const v9Templates = {
+    upperA: { id: "upperA", label: "Upper", exercises: [v9Def("Pull-Up"), v9Def("Diamond Push-Up", { targetReps: 10 })] },
+    lower: { id: "lower", label: "Legs", exercises: [v9Def("Goblet Squat", { loaded: true, targetReps: 10, targetRepsMax: 14 })] },
+    cardio: { id: "cardio", label: "Cardio", isCardio: true }
+  };
+  const v9Sess = (date, tid, entries) => ({ id: date, date, dayLabel: tid, templateId: tid, templateSnapshot: { isCardio: false, exercises: JSON.parse(JSON.stringify(v9Templates[tid].exercises)) }, exercises: entries });
+  const v9Entry = (name, reps, weight) => ({ name, isCustom: false, metric: "reps", loaded: weight > 0, sets: reps.map((r) => ({ reps: r, weight: weight || null, cadenceMs: null })) });
+  const v9State = Object.assign(L.freshState(), {
+    schemaVersion: 9,
+    templates: v9Templates,
+    weekPlan: { 0: "cardio", 1: "upperA", 2: "lower", 3: "upperA", 4: "lower", 5: "upperA", 6: "cardio" },
+    restDays: [0],
+    exerciseBank: {
+      "Pull-Up": { name: "Pull-Up", category: "Pull", metric: "reps", loaded: false, targetSets: 4, targetReps: 8 },
+      "Push-Up": { name: "Push-Up", category: "Push", metric: "reps", loaded: false, targetSets: 4, targetReps: 15 },
+      "Diamond Push-Up": { name: "Diamond Push-Up", category: "Push", metric: "reps", loaded: false, targetSets: 3, targetReps: 10 },
+      "Goblet Squat": { name: "Goblet Squat", category: "Legs", metric: "reps", loaded: true, targetSets: 4, targetReps: 12 }
+    },
+    sessions: [
+      v9Sess("2026-11-02", "upperA", [v9Entry("Pull-Up", [8, 8]), v9Entry("Diamond Push-Up", [10, 10])]),
+      v9Sess("2026-11-03", "lower", [v9Entry("Goblet Squat", [12, 11], 25)]),
+      v9Sess("2026-11-04", "upperA", [v9Entry("Pull-Up", [9, 7]), v9Entry("Diamond Push-Up", [11, 10])]),
+      v9Sess("2026-11-06", "upperA", [v9Entry("Pull-Up", [10, 9])])
+    ],
+    readiness: { "2026-11-04": { sleepScore: 70, restingHR: 60, soreness: 2, verdict: "STEADY" } },
+    exercises: {}
+  });
+  // The shape a v9 account really has: catalog keyed by name, no ids.
+  v9State.exercises = (() => { const c = L.rebuildExerciseCatalog(v9State), out = {}; Object.keys(c).forEach((k) => { const e = Object.assign({}, c[k]); delete e.id; out[e.name] = e; }); return out; })();
+  const v9Clone = () => JSON.parse(JSON.stringify(v9State));
+  const v10 = L.migrate(v9Clone());
+  const allDefs = (st) => [].concat(
+    Object.keys(st.exerciseBank).map((k) => st.exerciseBank[k]),
+    ...Object.keys(st.templates).map((k) => st.templates[k].exercises || []),
+    Object.keys(st.exercises).map((k) => st.exercises[k]),
+    ...st.sessions.map((x) => x.exercises),
+    ...st.sessions.map((x) => (x.templateSnapshot && x.templateSnapshot.exercises) || []));
+  check("v9->v10: stamps schema 10", v10.schemaVersion === 10 && L.SCHEMA_VERSION === 10);
+  check("v9->v10: every bank, workout, catalog, session and snapshot exercise has an id", allDefs(v10).every((e) => typeof e.id === "string" && /^[a-z0-9][a-z0-9-]*$/.test(e.id)));
+  check("v9->v10: the bank and catalog are keyed by id", Object.keys(v10.exerciseBank).every((k) => v10.exerciseBank[k].id === k) && Object.keys(v10.exercises).every((k) => v10.exercises[k].id === k));
+  const idsByName = {};
+  const sameNameSameId = allDefs(v10).every((e) => { if (idsByName[e.name] && idsByName[e.name] !== e.id) return false; idsByName[e.name] = e.id; return true; });
+  check("v9->v10: the same name always gets the same id", sameNameSameId && idsByName["Pull-Up"] === "pull-up");
+  const collide = L.stampExerciseIds({ exerciseBank: { "Push-Up": { name: "Push-Up", targetSets: 3, targetReps: 10 }, "Push Up": { name: "Push Up", targetSets: 3, targetReps: 10 } }, templates: {}, exercises: {}, sessions: [{ date: "2026-11-01", exercises: [{ name: "Push Up", sets: [{ reps: 10 }] }] }] });
+  check("v9->v10: two different names that slug alike get distinct ids (no silent merge)", collide.exerciseBank["push-up"].name === "Push-Up" && collide.exerciseBank["push-up-2"].name === "Push Up" && collide.sessions[0].exercises[0].id === "push-up-2");
+  check("v9->v10: running the id stamp again changes nothing", JSON.stringify(L.stampExerciseIds(v10)) === JSON.stringify(v10));
+  check("v9->v10: sessions only gain ids (sets and dates unchanged)", JSON.stringify(v10.sessions, (k, v) => (k === "id" && typeof v === "string" ? undefined : v)) === JSON.stringify(v9State.sessions, (k, v) => (k === "id" && typeof v === "string" ? undefined : v)));
+  const v10Now = new Date("2026-11-07T12:00:00");
+  const sameNumbers = (a, b) => {
+    const dates = ["2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06"];
+    const comp = (st) => dates.map((d) => L.isDayCompliant(st, new Date(d + "T12:00:00"))).join(",");
+    return comp(a) === comp(b)
+      && JSON.stringify(L.computeStreakInfo(a, v10Now)) === JSON.stringify(L.computeStreakInfo(b, v10Now))
+      && JSON.stringify(L.computeAttributes(a, v10Now)) === JSON.stringify(L.computeAttributes(b, v10Now))
+      && L.buildDigest(a, v10Now) === L.buildDigest(b, v10Now);
+  };
+  check("v9->v10: compliance, streak, attributes and digest are identical", sameNumbers(v9State, v10));
+  const sugOf = (st, def) => JSON.stringify(L.buildExerciseViewModel(def, null, L.deriveCatalog(st, { before: "2026-11-07" })).suggestion);
+  check("v9->v10: suggestions are identical", v9Templates.upperA.exercises.concat(v9Templates.lower.exercises).every((d, i) => {
+    const migratedDef = v10.templates[i < 2 ? "upperA" : "lower"].exercises[i < 2 ? i : 0];
+    return sugOf(v9State, d) === sugOf(v10, migratedDef);
+  }));
+
+  // Rename keeps history and suggestions.
+  const pullDefV10 = v10.templates.upperA.exercises[0];
+  const beforeRename = { sug: sugOf(v10, pullDefV10), hist: JSON.stringify(L.buildExerciseHistory(v10.sessions, "pull-up").points), entry: L.deriveCatalogEntry(v10, "pull-up") };
+  const renamed = L.renameExercise(v10, "pull-up", "Bar Pull-Up");
+  const rs = renamed.state;
+  check("rename: no error for a fresh name", !renamed.error && !!rs);
+  check("rename: the bank, every workout and the catalog show the new name", rs.exerciseBank["pull-up"].name === "Bar Pull-Up" && rs.templates.upperA.exercises[0].name === "Bar Pull-Up" && rs.exercises["pull-up"].name === "Bar Pull-Up");
+  check("rename: the id doesn't change", rs.templates.upperA.exercises[0].id === "pull-up" && !!rs.exerciseBank["pull-up"]);
+  check("rename: logged sessions are untouched", JSON.stringify(rs.sessions) === JSON.stringify(v10.sessions));
+  check("rename: history and suggestions carry over", sugOf(rs, rs.templates.upperA.exercises[0]) === beforeRename.sug
+    && JSON.stringify(L.buildExerciseHistory(rs.sessions, "pull-up").points) === beforeRename.hist
+    && L.deriveCatalogEntry(rs, "pull-up").lastReps === beforeRename.entry.lastReps && L.deriveCatalogEntry(rs, "pull-up").name === "Bar Pull-Up");
+  check("rename: compliance, streak, attributes unchanged", (() => {
+    const dates = ["2026-11-02", "2026-11-04", "2026-11-06"];
+    return dates.every((d) => L.isDayCompliant(rs, new Date(d + "T12:00:00")) === L.isDayCompliant(v10, new Date(d + "T12:00:00")))
+      && JSON.stringify(L.computeStreakInfo(rs, v10Now)) === JSON.stringify(L.computeStreakInfo(v10, v10Now));
+  })());
+  check("rename: a renamed built-in keeps its how-to description", L.resolveExerciseDescription(rs, rs.templates.upperA.exercises[0]) === L.BUILTIN_BANK_BY_NAME["Pull-Up"].description);
+  check("rename: the digest uses the current name", L.buildDigest(rs, v10Now).indexOf("Bar Pull-Up") !== -1);
+  check("rename: a name that loosely matches another exercise is refused", /already exists/.test(L.renameExercise(v10, "pull-up", "push-ups").error || ""));
+  check("rename: a case-only change of its own name is allowed", !L.renameExercise(v10, "pull-up", "Pull-up").error);
+  check("rename: markup is stripped from the new name", L.renameExercise(v10, "pull-up", "<b>Bar</b> Pulls").state.exerciseBank["pull-up"].name === "Bar Pulls");
+  check("rename: an unknown id is refused", !!L.renameExercise(v10, "not-a-thing", "X").error);
+
+  // Loose matching on import.
+  check("normalizeExerciseName ignores case, spaces, hyphens and a trailing s", ["Push-Up", "push up", "PUSH-UPS", "pushup"].every((n) => L.normalizeExerciseName(n) === "pushup"));
+  const looseImport = L.parsePlanChangePayload(JSON.stringify({ planChanges: { templates: { upperA: { exercises: [{ name: "pull ups", targetSets: 3, targetReps: 9 }, { name: "push-up", targetSets: 3, targetReps: 12 }, { name: "Face Pull", loaded: false, targetSets: 3, targetReps: 15 }] } } } }), v10);
+  const looseApplied = L.applyPlanChanges(v10, looseImport.payload);
+  const lu = looseApplied.templates.upperA.exercises;
+  check("import: \"pull ups\" matches the existing Pull-Up (id and name)", lu[0].id === "pull-up" && lu[0].name === "Pull-Up" && lu[0].targetReps === 9);
+  check("import: \"push-up\" matches Push-Up", lu[1].id === "push-up" && lu[1].name === "Push-Up");
+  check("import: an unknown name becomes a new exercise with its own id", lu[2].id === "face-pull" && !!looseApplied.exerciseBank["face-pull"]);
+  check("import: no duplicate bank entries for loose matches", !Object.keys(looseApplied.exerciseBank).some((k) => /^pull-ups|^push-up-3/.test(k)));
+  const looseDiff = L.diffPlanChanges(v10, looseImport.payload)[0].lines.join("\n");
+  check("import preview: a loose match is a change, not an add", /Pull-Up: 2×8 reps → 3×9 reps/.test(looseDiff) && !/Added: pull ups/.test(looseDiff) && /\+ Added: Face Pull/.test(looseDiff));
+  check("import: a renamed exercise is still found by its old name", L.resolveExercise(rs, "Pull-Up").id === "pull-up" && L.resolveExercise(rs, "Pull-Up").name === "Bar Pull-Up");
+  const hijack = L.parsePlanChangePayload(JSON.stringify({ planChanges: { templates: { upperA: { exercises: [{ id: "pull-up", name: "Evil Move", targetSets: 3, targetReps: 8 }] } } } }), v10);
+  check("import: an id inside a plan is ignored, so it can't claim one of your exercises", L.applyPlanChanges(v10, hijack.payload).templates.upperA.exercises[0].id === "evil-move");
+  check("share links carry names, not this account's ids", JSON.stringify(L.buildSharePlanPayload(v10)).indexOf('"id":"pull-up"') === -1);
+
+  // Every creation path stamps ids.
+  const hasIds = (st) => Object.keys(st.exerciseBank).every((k) => st.exerciseBank[k].id === k)
+    && Object.keys(st.templates).every((k) => (st.templates[k].exercises || []).every((e) => typeof e.id === "string" && e.id.length > 0));
+  check("a fresh install has ids everywhere", hasIds(L.freshState()));
+  const starterPc = L.STARTER_PLANS[0].planChanges;
+  const starterApplied = L.applyPlanChanges(L.freshState(), L.parsePlanChangePayload(JSON.stringify({ planChanges: starterPc }), L.freshState()).payload);
+  check("applying a starter plan leaves ids everywhere", hasIds(starterApplied));
+  const upsertedNew = L.upsertBankEntry(v10.exerciseBank, { name: "Sled Drag", category: "Conditioning", targetSets: 3, targetReps: 30 });
+  check("a new bank entry is keyed by its id", upsertedNew.entry.id === "sled-drag" && upsertedNew.bank["sled-drag"] === upsertedNew.entry);
+  check("bankEntryToTemplateDef carries the id", L.bankEntryToTemplateDef(upsertedNew.entry).id === "sled-drag");
+  check("addMissingToBank skips a loose duplicate of an existing entry", Object.keys(L.addMissingToBank(v10.exerciseBank, [{ name: "pull ups", targetSets: 3, targetReps: 8 }])).length === Object.keys(v10.exerciseBank).length);
 
   /* ---- summary ---- */
   console.log("\n" + passes + " passed, " + failures + " failed.");

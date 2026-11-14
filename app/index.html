@@ -659,7 +659,7 @@
 (function (root) {
   "use strict";
 
-  var SCHEMA_VERSION = 9;
+  var SCHEMA_VERSION = 10;
 
   var WEEKDAY_LABELS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 
@@ -974,6 +974,240 @@
     return suggestProgression(def, lastPerf, readinessVerdict, ownedWeights, catalogEntry.missStreak || 0, isDeloadWeek);
   }
 
+  /* ---------- exercise identity ----------
+     An exercise's identity is its `id`: a slug of the name it was first
+     created under ("Pull-Up" -> "pull-up"). The name is display text, so
+     renaming keeps the id and every bit of history, bests and suggestions
+     that hangs off it. Everything that compares or keys exercises goes
+     through exerciseIdOf, which also gives a name-only object (a plan
+     import, a preset, an old share link, data from before ids) the id its
+     name would have been given. */
+  var EXERCISE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+  function hasOwn(obj, key) {
+    return !!obj && Object.prototype.hasOwnProperty.call(obj, key);
+  }
+
+  function exerciseSlug(name) {
+    var s = String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-+|-+$)/g, "");
+    return s.slice(0, 60) || "exercise";
+  }
+
+  function exerciseIdOf(x) {
+    if (!x) return "";
+    if (typeof x === "string") return exerciseSlug(x);
+    if (typeof x.id === "string" && EXERCISE_ID_PATTERN.test(x.id)) return x.id;
+    return exerciseSlug(x.name);
+  }
+
+  // A loose form of a name for matching: case, spaces, hyphens and a
+  // trailing "s" don't make a different exercise ("push ups" = "Push-Up").
+  function normalizeExerciseName(name) {
+    return String(name || "").toLowerCase().replace(/[^a-z0-9]/g, "").replace(/s$/, "");
+  }
+
+  // A bank/catalog entry by id, also finding one in a map still keyed by
+  // name (data from before ids, or a hand-built fixture).
+  function lookupByExercise(map, ref) {
+    if (!map || !ref) return null;
+    var id = exerciseIdOf(ref);
+    if (hasOwn(map, id)) return map[id];
+    var name = typeof ref === "string" ? ref : ref.name;
+    if (name && hasOwn(map, name)) return map[name];
+    var keys = Object.keys(map);
+    for (var i = 0; i < keys.length; i++) {
+      var e = map[keys[i]];
+      if (e && (e.id === id || (name && e.name === name) || exerciseIdOf(e.id ? e : e.name || keys[i]) === id)) return e;
+    }
+    return null;
+  }
+
+  // Every exercise this account knows, as id -> current name: the bank,
+  // then the progress catalog, then any workout.
+  function knownExercises(state) {
+    var out = {};
+    var add = function (x, fallbackName) {
+      var name = (x && x.name) || fallbackName;
+      if (!name) return;
+      var id = exerciseIdOf(x && x.id ? x : name);
+      if (!hasOwn(out, id)) out[id] = name;
+    };
+    var bank = (state && state.exerciseBank) || {};
+    Object.keys(bank).forEach(function (k) { add(bank[k], k); });
+    var catalog = (state && state.exercises) || {};
+    Object.keys(catalog).forEach(function (k) { add(catalog[k], k); });
+    var templates = getTemplates(state);
+    Object.keys(templates).forEach(function (t) { (templates[t].exercises || []).forEach(function (e) { add(e); }); });
+    return out;
+  }
+
+  function uniqueExerciseId(base, taken) {
+    var id = base, n = 2;
+    while (hasOwn(taken, id)) id = base + "-" + n++;
+    return id;
+  }
+
+  // Which existing exercise a name (or {id, name}) refers to: a known id
+  // first, then a loose name match, then a loose match against ids (so
+  // "Pull-Up" still finds an exercise that's since been renamed). Anything
+  // else is new and gets a fresh, unused id.
+  function resolveExercise(state, ref, known) {
+    known = known || knownExercises(state);
+    var name = typeof ref === "string" ? ref : (ref && ref.name) || "";
+    var explicitId = ref && typeof ref === "object" && typeof ref.id === "string" && EXERCISE_ID_PATTERN.test(ref.id) ? ref.id : null;
+    if (explicitId && hasOwn(known, explicitId)) return { id: explicitId, name: known[explicitId], isNew: false };
+    var norm = normalizeExerciseName(name);
+    var ids = Object.keys(known);
+    if (norm) {
+      for (var i = 0; i < ids.length; i++) if (normalizeExerciseName(known[ids[i]]) === norm) return { id: ids[i], name: known[ids[i]], isNew: false };
+      for (var j = 0; j < ids.length; j++) if (normalizeExerciseName(ids[j]) === norm) return { id: ids[j], name: known[ids[j]], isNew: false };
+    }
+    return { id: uniqueExerciseId(explicitId || exerciseSlug(name), known), name: name, isNew: true };
+  }
+
+  // Each def gets the id of the exercise it names, adopting that exercise's
+  // display name -- so an import's "push up" lands as this account's
+  // "Push-Up" and shares its history. Unknown names become new exercises.
+  function resolveExerciseDefs(state, defs) {
+    var known = knownExercises(state);
+    return (defs || []).map(function (d) {
+      var r = resolveExercise(state, d, known);
+      if (r.isNew) known[r.id] = r.name;
+      return Object.assign({ id: r.id }, d, { id: r.id, name: r.name });
+    });
+  }
+
+  function exerciseDisplayName(state, ref) {
+    var e = lookupByExercise(state && state.exerciseBank, ref) || lookupByExercise(state && state.exercises, ref);
+    if (e && e.name) return e.name;
+    if (typeof ref === "string") return ref;
+    return (ref && ref.name) || exerciseIdOf(ref);
+  }
+
+  // Renaming changes the display name in the bank, every workout and the
+  // progress catalog. Logged sessions keep the name they were logged under
+  // -- they're history, and the id already ties them to the exercise. A
+  // name that loosely matches a DIFFERENT exercise is refused: that's two
+  // exercises becoming one, which is what Merge is for.
+  function renameExercise(state, id, newName) {
+    var name = typeof newName === "string" ? stripAngleBrackets(newName).trim().slice(0, MAX_NAME_LENGTH) : "";
+    if (!name) return { error: "Give the exercise a name." };
+    if (RESERVED_NAMES.indexOf(name) !== -1) return { error: "That name can't be used." };
+    var known = knownExercises(state);
+    if (!hasOwn(known, id)) return { error: "That exercise wasn't found." };
+    var norm = normalizeExerciseName(name);
+    var clash = Object.keys(known).filter(function (k) { return k !== id && normalizeExerciseName(known[k]) === norm; })[0];
+    if (clash) return { error: "“" + known[clash] + "” already exists — pick a different name." };
+    var renamed = function (x) { return Object.assign({ id: id }, x, { id: id, name: name }); };
+    var next = Object.assign({}, state);
+    if (state.exerciseBank) {
+      var bank = {};
+      Object.keys(state.exerciseBank).forEach(function (k) {
+        var e = state.exerciseBank[k];
+        if (exerciseIdOf(e && e.id ? e : (e && e.name) || k) === id) bank[id] = renamed(e);
+        else bank[k] = e;
+      });
+      next.exerciseBank = bank;
+    }
+    if (state.templates) {
+      var templates = cloneTemplates(state.templates);
+      Object.keys(templates).forEach(function (t) {
+        if (Array.isArray(templates[t].exercises)) templates[t].exercises = templates[t].exercises.map(function (e) { return exerciseIdOf(e) === id ? renamed(e) : e; });
+      });
+      next.templates = templates;
+    }
+    if (state.exercises) {
+      var catalog = {};
+      Object.keys(state.exercises).forEach(function (k) {
+        var e = state.exercises[k];
+        if (exerciseIdOf(e && e.id ? e : (e && e.name) || k) === id) catalog[id] = renamed(e);
+        else catalog[k] = e;
+      });
+      next.exercises = catalog;
+    }
+    return { state: next };
+  }
+
+  // v10: every exercise in the bank, workouts, catalog, sessions and their
+  // snapshots gets an id. Objects that already carry one keep it (so this is
+  // safe to run again); otherwise the same name always gets the same id,
+  // and two different names that would slug alike get "-2", "-3". Sessions
+  // only gain the field -- nothing about whether a day counted changes.
+  function stampExerciseIds(state) {
+    var next = Object.assign({}, state);
+    var idForName = {}, taken = {};
+    var each = function (fn) {
+      var bank = state.exerciseBank || {};
+      Object.keys(bank).forEach(function (k) { fn(bank[k], k); });
+      var templates = state.templates || {};
+      Object.keys(templates).forEach(function (t) { (templates[t].exercises || []).forEach(function (e) { fn(e); }); });
+      var catalog = state.exercises || {};
+      Object.keys(catalog).forEach(function (k) { fn(catalog[k], k); });
+      (state.sessions || []).slice().sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; }).forEach(function (sess) {
+        (sess.exercises || []).forEach(function (e) { fn(e); });
+        ((sess.templateSnapshot && sess.templateSnapshot.exercises) || []).forEach(function (e) { fn(e); });
+      });
+    };
+    var nameOf = function (x, key) { return (x && typeof x.name === "string" && x.name) || key || null; };
+    // Pass 1: ids already present are reserved, so a new slug can't take one.
+    each(function (x, key) {
+      if (x && typeof x.id === "string" && EXERCISE_ID_PATTERN.test(x.id)) {
+        taken[x.id] = true;
+        var n = nameOf(x, key);
+        if (n && !hasOwn(idForName, n)) idForName[n] = x.id;
+      }
+    });
+    // Pass 2: everything without one gets the id for its name.
+    var idOf = function (x, key) {
+      if (x && typeof x.id === "string" && EXERCISE_ID_PATTERN.test(x.id)) return x.id;
+      var n = nameOf(x, key);
+      if (!n) return null;
+      if (!hasOwn(idForName, n)) { var id = uniqueExerciseId(exerciseSlug(n), taken); idForName[n] = id; taken[id] = true; }
+      return idForName[n];
+    };
+    each(function (x, key) { idOf(x, key); });
+    var stamp = function (x, key) {
+      var id = idOf(x, key);
+      if (!id) return x;
+      var out = Object.assign({ id: id }, x, { id: id });
+      if (!out.name && key) out.name = key;
+      return out;
+    };
+
+    if (state.exerciseBank) {
+      var bank = {};
+      Object.keys(state.exerciseBank).forEach(function (k) { var e = stamp(state.exerciseBank[k], k); bank[e.id || k] = e; });
+      next.exerciseBank = bank;
+    }
+    if (state.templates) {
+      var templates = cloneTemplates(state.templates);
+      Object.keys(templates).forEach(function (t) {
+        if (Array.isArray(templates[t].exercises)) templates[t].exercises = templates[t].exercises.map(function (e) { return stamp(e); });
+      });
+      next.templates = templates;
+    }
+    if (state.exercises) {
+      var catalog = {};
+      Object.keys(state.exercises).forEach(function (k) { var e = stamp(state.exercises[k], k); catalog[e.id || k] = e; });
+      next.exercises = catalog;
+    }
+    if (state.sessions) {
+      next.sessions = state.sessions.map(function (sess) {
+        var copy = Object.assign({}, sess);
+        if (Array.isArray(sess.exercises)) copy.exercises = sess.exercises.map(function (e) { return stamp(e); });
+        if (sess.templateSnapshot && Array.isArray(sess.templateSnapshot.exercises)) {
+          copy.templateSnapshot = Object.assign({}, sess.templateSnapshot, { exercises: sess.templateSnapshot.exercises.map(function (e) { return stamp(e); }) });
+        }
+        return copy;
+      });
+    }
+    return next;
+  }
+
+  function migrateV9ToV10(state) {
+    return stampExerciseIds(state);
+  }
+
   /* ---------- progression catalog, derived from sessions ----------
      state.exercises is a cache of per-exercise progression facts (last
      performance, bests, miss streak). Sessions are the source of truth:
@@ -1005,17 +1239,17 @@
 
   // The target an exercise was judged against that day: the session's own
   // frozen snapshot. Sessions from before snapshots existed have none.
-  function sessionTargetDef(session, name) {
+  function sessionTargetDef(session, id) {
     var snap = session && session.templateSnapshot;
     var list = (snap && snap.exercises) || [];
-    for (var i = 0; i < list.length; i++) if (list[i].name === name) return list[i];
+    for (var i = 0; i < list.length; i++) if (exerciseIdOf(list[i]) === id) return list[i];
     return null;
   }
 
   // Rebuilds catalog entries by replaying sessions oldest to newest.
   //   opts.before -- a date key; only sessions strictly before it count
   //                  (what was known going INTO that day)
-  //   opts.names  -- limit to these exercise names
+  //   opts.names  -- limit to these exercises (ids, or names/objects)
   // Date keys are compared as strings ("YYYY-MM-DD" sorts correctly), never
   // parsed into Dates, so the result can't depend on the device timezone.
   //
@@ -1028,7 +1262,7 @@
   function deriveCatalog(state, opts) {
     opts = opts || {};
     var before = opts.before || null;
-    var only = opts.names || null;
+    var only = opts.names ? opts.names.map(exerciseIdOf) : null;
     var stored = (state && state.exercises) || {};
     var sessions = ((state && state.sessions) || [])
       .filter(function (s) { return s && typeof s.date === "string" && (!before || s.date < before); })
@@ -1038,8 +1272,9 @@
     var acc = {};
     sessions.forEach(function (session) {
       (session.exercises || []).forEach(function (exEntry) {
-        var name = exEntry && exEntry.name;
-        if (!name || (only && only.indexOf(name) === -1)) return;
+        if (!exEntry || !exEntry.name) return;
+        var name = exerciseIdOf(exEntry);
+        if (only && only.indexOf(name) === -1) return;
         var perf = sessionExercisePerformance(exEntry);
         if (!perf) return;
         var prev = acc[name] || null;
@@ -1051,14 +1286,14 @@
           if (target !== undefined) missStreak = (target == null || perf.minReps >= target) ? 0 : missStreak + 1;
         }
         acc[name] = {
-          name: name,
+          loggedName: exEntry.name,
           lastReps: perf.minReps,
           lastWeight: perf.maxWeight,
           bestWeight: Math.max(prev ? prev.bestWeight : 0, perf.maxWeight),
           bestReps: Math.max(prev ? prev.bestReps : 0, perf.maxReps),
           bestE1RM: Math.max(prev ? prev.bestE1RM : 0, perf.e1rm),
           missStreak: missStreak,
-          metric: exEntry.metric || (prev && prev.metric) || (stored[name] && stored[name].metric) || "reps",
+          metric: exEntry.metric || (prev && prev.metric) || ((lookupByExercise(stored, name) || {}).metric) || "reps",
           lastSetCount: exEntry.sets.length,
           lastLoadedFlag: exEntry.loaded,
           everWeighted: (prev && prev.everWeighted) || perf.maxWeight > 0,
@@ -1069,7 +1304,8 @@
 
     var out = {};
     Object.keys(acc).forEach(function (name) {
-      var a = acc[name], s = stored[name];
+      var a = acc[name], s = lookupByExercise(stored, name);
+      var bankEntry = lookupByExercise(state && state.exerciseBank, name);
       // Weighted-or-not is a setting, not just history: an explicit "no" on
       // the newest log wins, any weight ever logged means yes, and otherwise
       // the stored setting stands -- so the v9 bodyweight fix isn't undone by
@@ -1079,7 +1315,10 @@
         : (s && typeof s.loaded === "boolean") ? s.loaded
         : true;
       out[name] = {
-        name: name,
+        id: name,
+        // Current display name: the bank's, else what the cache had, else
+        // the name it was last logged under.
+        name: (bankEntry && bankEntry.name) || (s && s.name) || a.loggedName,
         lastReps: a.lastReps,
         lastWeight: a.lastWeight,
         bestWeight: a.bestWeight,
@@ -1096,9 +1335,10 @@
     return out;
   }
 
-  function deriveCatalogEntry(state, name, opts) {
-    var o = Object.assign({}, opts || {}, { names: [name] });
-    return deriveCatalog(state, o)[name] || null;
+  function deriveCatalogEntry(state, ref, opts) {
+    var id = exerciseIdOf(ref);
+    var o = Object.assign({}, opts || {}, { names: [id] });
+    return deriveCatalog(state, o)[id] || null;
   }
 
   // The most recent performance logged BEFORE dateKey, as { weight, reps }
@@ -1113,7 +1353,13 @@
   function rebuildExerciseCatalog(state) {
     var next = Object.assign({}, (state && state.exercises) || {});
     var derived = deriveCatalog(state);
-    Object.keys(derived).forEach(function (name) { next[name] = derived[name]; });
+    Object.keys(derived).forEach(function (id) {
+      // Drop a stale entry for the same exercise still keyed by name.
+      Object.keys(next).forEach(function (k) {
+        if (k !== id && exerciseIdOf(next[k] && next[k].id ? next[k] : k) === id) delete next[k];
+      });
+      next[id] = derived[id];
+    });
     return next;
   }
 
@@ -1310,7 +1556,8 @@
 
     if (snapshot.isCardio) return !!session.cardio;
     return snapshot.exercises.every(function (def) {
-      var e = session.exercises && session.exercises.filter(function (x) { return x.name === def.name; })[0];
+      var defId = exerciseIdOf(def);
+      var e = session.exercises && session.exercises.filter(function (x) { return exerciseIdOf(x) === defId; })[0];
       return !!e && allSetsComplete(e.sets, def.targetSets);
     });
   }
@@ -1413,24 +1660,25 @@
         var filled = (ex.sets || []).filter(isSetFilled);
         if (!filled.length) return;
         var loadedBest = bestE1RMInSets(ex.sets);
+        var id = exerciseIdOf(ex);
 
         if (loadedBest) {
-          var prevE1RM = bestE1RM[ex.name] || 0;
+          var prevE1RM = bestE1RM[id] || 0;
           if (loadedBest.e1rm > prevE1RM) {
             if (!sinceDateKey || session.date >= sinceDateKey) {
-              prs.push({ date: session.date, exercise: ex.name, type: "weight", weight: loadedBest.weight, reps: loadedBest.reps, est1RM: Math.round(loadedBest.e1rm) });
+              prs.push({ date: session.date, exerciseId: id, exercise: ex.name, type: "weight", weight: loadedBest.weight, reps: loadedBest.reps, est1RM: Math.round(loadedBest.e1rm) });
             }
-            bestE1RM[ex.name] = loadedBest.e1rm;
+            bestE1RM[id] = loadedBest.e1rm;
           }
         } else {
           var maxReps = filled.reduce(function (m, s) { return (s.reps && s.reps > m) ? s.reps : m; }, 0);
           if (maxReps <= 0) return;
-          var prevReps = bestReps[ex.name] || 0;
+          var prevReps = bestReps[id] || 0;
           if (maxReps > prevReps) {
             if (!sinceDateKey || session.date >= sinceDateKey) {
-              prs.push({ date: session.date, exercise: ex.name, type: "reps", reps: maxReps });
+              prs.push({ date: session.date, exerciseId: id, exercise: ex.name, type: "reps", reps: maxReps });
             }
-            bestReps[ex.name] = maxReps;
+            bestReps[id] = maxReps;
           }
         }
       });
@@ -1516,8 +1764,8 @@
     var consistencyScore = computeConsistency(state, now, 30);
 
     // Core, Balance and Recovery read logged sets / check-ins by category.
-    var categoryOf = function (name) {
-      var entry = (state.exerciseBank || {})[name] || BUILTIN_BANK_BY_NAME[name];
+    var categoryOf = function (ex) {
+      var entry = lookupByExercise(state.exerciseBank, ex) || BUILTIN_BANK_BY_ID[exerciseIdOf(ex)];
       return entry ? entry.category : null;
     };
     var coreDays = {}, setsBy = { Push: 0, Pull: 0, Legs: 0 };
@@ -1526,7 +1774,7 @@
       (s.exercises || []).forEach(function (ex) {
         var filled = (ex.sets || []).filter(isSetFilled).length;
         if (!filled) return;
-        var c = categoryOf(ex.name);
+        var c = categoryOf(ex);
         if (c === "Core") coreDays[s.date] = true;
         if (setsBy[c] !== undefined) setsBy[c] += filled;
       });
@@ -1593,10 +1841,13 @@
   // one-rep max across that session's sets, not raw weight or reps
   // independently -- bestWeight/bestReps are kept alongside only for the
   // raw-numbers table.
-  function buildExerciseHistory(sessions, exerciseName) {
+  // exerciseRef is an id (or a name/object, resolved the same way).
+  function buildExerciseHistory(sessions, exerciseRef) {
+    var exerciseName = exerciseRef;
+    var id = exerciseIdOf(exerciseRef);
     var points = [];
     sessions.slice().sort(function (a, b) { return a.date.localeCompare(b.date); }).forEach(function (s) {
-      var ex = (s.exercises || []).filter(function (e) { return e.name === exerciseName; })[0];
+      var ex = (s.exercises || []).filter(function (e) { return exerciseIdOf(e) === id; })[0];
       if (!ex) return;
       var filled = (ex.sets || []).filter(isSetFilled);
       if (!filled.length) return;
@@ -1609,13 +1860,11 @@
     return { exerciseName: exerciseName, metric: everLoaded ? "weight" : "reps", points: points };
   }
 
-  // Exercise names ever logged, most-recently-updated first.
+  // Exercises ever logged (catalog keys -- ids), most-recently-updated first.
   function listLoggedExercises(state) {
     var catalog = state.exercises || {};
     return Object.keys(catalog)
-      .map(function (name) { return catalog[name]; })
-      .sort(function (a, b) { return (b.updatedAt || "").localeCompare(a.updatedAt || ""); })
-      .map(function (entry) { return entry.name; });
+      .sort(function (a, b) { return (catalog[b].updatedAt || "").localeCompare(catalog[a].updatedAt || ""); });
   }
 
   // An exercise has plateaued if its best value (weight, or reps/seconds for
@@ -1635,7 +1884,7 @@
       var maxInWindow = Math.max.apply(null, values);
       if (maxInWindow <= values[0]) {
         plateaus.push({
-          exercise: name, metric: history.metric, sessions: windowSessions,
+          exerciseId: exerciseIdOf(lookupByExercise(state.exercises, name) || name), exercise: exerciseDisplayName(state, name), metric: history.metric, sessions: windowSessions,
           value: values[0], lastDate: recent[recent.length - 1].date
         });
       }
@@ -1715,6 +1964,10 @@
     if (version === 8) {
       state = migrateV8ToV9(state);
       version = 9;
+    }
+    if (version === 9) {
+      state = migrateV9ToV10(state);
+      version = 10;
     }
     state.schemaVersion = SCHEMA_VERSION;
     return state;
@@ -1954,7 +2207,7 @@
     state.exerciseBank = seedExerciseBank(state);
     state.onboarded = false;
     state.profile = null;
-    return state;
+    return stampExerciseIds(state);
   }
 
   /* ---------- template editing (pure, immutable) ---------- */
@@ -2058,7 +2311,8 @@
   var BANK_ADDED_IN_V8 = ["Incline Push-Up", "Knee Push-Up", "Floor Press", "Table Row", "Reverse Snow Angel", "Bodyweight Squat", "Split Squat",
     "Step-Up", "Single-Leg Glute Bridge", "Wall Sit", "Bird Dog", "Reverse Crunch", "Superman", "Step Jack", "Shadow Boxing"];
   var BUILTIN_BANK_BY_NAME = {};
-  DEFAULT_EXERCISE_BANK.forEach(function (e) { BUILTIN_BANK_BY_NAME[e.name] = e; });
+  var BUILTIN_BANK_BY_ID = {};
+  DEFAULT_EXERCISE_BANK.forEach(function (e) { BUILTIN_BANK_BY_NAME[e.name] = e; BUILTIN_BANK_BY_ID[exerciseSlug(e.name)] = e; });
 
   // A template exercise's own description (copied in at pick-time) wins;
   // otherwise fall back to the user's current bank entry, then the
@@ -2069,11 +2323,11 @@
   // custom, never-banked exercise name comes back with nothing.
   function resolveExerciseDescription(state, def) {
     if (def && def.description) return def.description;
-    var name = def && def.name;
-    if (!name) return "";
-    var fromBank = state && state.exerciseBank && state.exerciseBank[name];
+    if (!def || !def.name) return "";
+    // By id, so a renamed exercise keeps its own (or the built-in) cue.
+    var fromBank = lookupByExercise(state && state.exerciseBank, def);
     if (fromBank && fromBank.description) return fromBank.description;
-    var builtin = BUILTIN_BANK_BY_NAME[name];
+    var builtin = BUILTIN_BANK_BY_ID[exerciseIdOf(def)] || BUILTIN_BANK_BY_NAME[def.name];
     return (builtin && builtin.description) || "";
   }
 
@@ -2090,10 +2344,13 @@
   function addMissingToBank(bank, defs) {
     var next = Object.assign({}, bank || {});
     (defs || []).forEach(function (d) {
-      if (!d || !d.name || next[d.name]) return;
-      var builtin = BUILTIN_BANK_BY_NAME[d.name];
-      var entry = sanitizeBankEntry(Object.assign({}, d, { category: d.category || (builtin ? builtin.category : null) }));
-      if (entry) next[entry.name] = entry;
+      if (!d || !d.name || lookupByExercise(next, d)) return;
+      var norm = normalizeExerciseName(d.name);
+      if (Object.keys(next).some(function (k) { return normalizeExerciseName(next[k] && next[k].name) === norm; })) return;
+      var id = exerciseIdOf(d);
+      var builtin = BUILTIN_BANK_BY_ID[id] || BUILTIN_BANK_BY_NAME[d.name];
+      var entry = sanitizeBankEntry(Object.assign({}, d, { id: id, category: d.category || (builtin ? builtin.category : null) }));
+      if (entry) next[entry.id] = entry;
     });
     return next;
   }
@@ -2106,9 +2363,11 @@
     var templates = getTemplates(state);
     Object.keys(templates).forEach(function (id) { bank = addMissingToBank(bank, templates[id].exercises || []); });
     var catalog = (state && state.exercises) || {};
-    bank = addMissingToBank(bank, Object.keys(catalog).map(function (name) {
-      var c = catalog[name];
-      return { name: name, metric: c.metric, loaded: c.loaded !== false, targetSets: c.lastSetCount || 3, targetReps: c.lastReps || 10 };
+    bank = addMissingToBank(bank, Object.keys(catalog).map(function (key) {
+      var c = catalog[key];
+      var def = { name: c.name || key, metric: c.metric, loaded: c.loaded !== false, targetSets: c.lastSetCount || 3, targetReps: c.lastReps || 10 };
+      if (c.id) def.id = c.id;
+      return def;
     }));
     return bank;
   }
@@ -2132,23 +2391,31 @@
   }
 
   function bankEntryToTemplateDef(entry) {
-    var def = { name: entry.name, metric: entry.metric, loaded: entry.loaded, targetSets: entry.targetSets, targetReps: entry.targetReps };
+    var def = { id: exerciseIdOf(entry), name: entry.name, metric: entry.metric, loaded: entry.loaded, targetSets: entry.targetSets, targetReps: entry.targetReps };
     if (entry.targetRepsMax) def.targetRepsMax = entry.targetRepsMax;
     if (entry.description) def.description = entry.description;
     return def;
   }
 
+  // raw.id says which exercise is being saved; without one, the name's
+  // slug is used (callers check for a loose duplicate first).
   function upsertBankEntry(bank, raw) {
     var entry = sanitizeBankEntry(raw);
     if (!entry) return null;
-    var next = Object.assign({}, bank || {});
-    next[entry.name] = entry;
+    var id = exerciseIdOf(entry);
+    entry = Object.assign({ id: id }, entry, { id: id });
+    var next = removeBankEntry(bank, id);
+    next[id] = entry;
     return { bank: next, entry: entry };
   }
 
-  function removeBankEntry(bank, name) {
+  function removeBankEntry(bank, ref) {
     var next = Object.assign({}, bank || {});
-    delete next[name];
+    var id = exerciseIdOf(ref);
+    Object.keys(next).forEach(function (k) {
+      var e = next[k];
+      if (k === ref || k === id || exerciseIdOf(e && e.id ? e : (e && e.name) || k) === id) delete next[k];
+    });
     return next;
   }
 
@@ -2584,9 +2851,10 @@
       // Cardio has no exercise list, and an empty workout would only
       // produce a "skipped" warning on the other end.
       if (t.isCardio || !(t.exercises || []).length) return;
-      out[id] = { label: t.label, exercises: JSON.parse(JSON.stringify(t.exercises)) };
+      // Ids are this account's own; the receiver matches by name.
+      out[id] = { label: t.label, exercises: t.exercises.map(function (e) { var c = JSON.parse(JSON.stringify(e)); delete c.id; return c; }) };
       if (t.focus && t.focus.length) out[id].focus = t.focus.slice();
-      t.exercises.forEach(function (e) { if (bank[e.name] && bank[e.name].category) categories[e.name] = bank[e.name].category; });
+      t.exercises.forEach(function (e) { var b = lookupByExercise(bank, e); if (b && b.category) categories[e.name] = b.category; });
     });
     var weekPlan = {};
     Object.keys(state.weekPlan || {}).forEach(function (day) {
@@ -2706,7 +2974,8 @@
     // An explicit true/false wins. When a payload omits the flag, a built-in
     // exercise keeps its own (so a bare "Push-Up" isn't silently weighted);
     // only an unknown name defaults to weighted.
-    var builtin = BUILTIN_BANK_BY_NAME[name];
+    var rawId = typeof raw.id === "string" && EXERCISE_ID_PATTERN.test(raw.id) && raw.id.length <= 60 ? raw.id : null;
+    var builtin = (rawId && BUILTIN_BANK_BY_ID[rawId]) || BUILTIN_BANK_BY_NAME[name] || BUILTIN_BANK_BY_ID[exerciseSlug(name)];
     var def = {
       name: name,
       metric: raw.metric === "seconds" ? "seconds" : "reps",
@@ -2725,7 +2994,7 @@
       var description = stripAngleBrackets(raw.description).trim().slice(0, MAX_DESCRIPTION_LENGTH);
       if (description) def.description = description;
     }
-    return def;
+    return rawId ? Object.assign({ id: rawId }, def) : def;
   }
 
   function formatExerciseTarget(e) {
@@ -2777,7 +3046,7 @@
           errors.push('Template "' + templateId + '" has no exercises array — skipped.');
           return;
         }
-        var cleaned = entry.exercises.map(sanitizeExerciseDef).filter(Boolean);
+        var cleaned = entry.exercises.map(sanitizeExerciseDef).filter(Boolean).map(function (d) { delete d.id; return d; });
         if (!cleaned.length) {
           errors.push('Template "' + templateId + '" had no valid exercises after validation — skipped.');
           return;
@@ -2865,10 +3134,13 @@
       var oldTemplate = templates[templateId];
       var newExercises = payload.templates[templateId];
       var oldExercises = (oldTemplate && oldTemplate.exercises) || [];
+      // Matched by exercise, not spelling: "push up" in an import is the
+      // same Push-Up already in this workout.
+      newExercises = resolveExerciseDefs(state, newExercises);
       var oldByName = {};
-      oldExercises.forEach(function (e) { oldByName[e.name] = e; });
+      oldExercises.forEach(function (e) { oldByName[exerciseIdOf(e)] = e; });
       var newByName = {};
-      newExercises.forEach(function (e) { newByName[e.name] = e; });
+      newExercises.forEach(function (e) { newByName[exerciseIdOf(e)] = e; });
 
       var lines = [];
       if (oldTemplate && labels[templateId] && labels[templateId] !== oldTemplate.label) {
@@ -2880,7 +3152,7 @@
         lines.push("Focus: " + (oldFocus.length ? oldFocus.join(", ") : "none") + " → " + (newFocus.length ? newFocus.join(", ") : "none"));
       }
       newExercises.forEach(function (ne) {
-        var oe = oldByName[ne.name];
+        var oe = oldByName[exerciseIdOf(ne)];
         if (!oe) {
           lines.push("+ Added: " + ne.name + " (" + formatExerciseTarget(ne) + (ne.loaded ? "" : ", bodyweight") + ")");
         } else if (oe.targetSets !== ne.targetSets || oe.targetReps !== ne.targetReps || oe.metric !== ne.metric || oe.loaded !== ne.loaded || (oe.targetRepsMax || null) !== (ne.targetRepsMax || null)) {
@@ -2888,7 +3160,7 @@
         }
       });
       oldExercises.forEach(function (oe) {
-        if (!newByName[oe.name]) lines.push("− Removed: " + oe.name);
+        if (!newByName[exerciseIdOf(oe)]) lines.push("− Removed: " + oe.name);
       });
 
       changes.push({
@@ -2937,13 +3209,19 @@
     next.templates = Object.assign({}, state.templates);
     Object.keys(payload.templates || {}).forEach(function (templateId) {
       var oldTemplate = next.templates[templateId] || { id: templateId };
-      var patch = { exercises: payload.templates[templateId] };
+      var incoming = payload.templates[templateId];
+      var resolved = resolveExerciseDefs(next, incoming);
+      // Two spellings of one exercise in the same list keep only the first.
+      var seen = {}, keep = [];
+      resolved.forEach(function (d, i) { if (!seen[d.id]) { seen[d.id] = true; keep.push(i); } });
+      var patch = { exercises: keep.map(function (i) { return resolved[i]; }) };
       if (labels[templateId]) patch.label = labels[templateId];
       if ((payload.focus || {})[templateId]) patch.focus = payload.focus[templateId];
       next.templates[templateId] = Object.assign({}, oldTemplate, patch);
       var cats = payload.categories || {};
-      next.exerciseBank = addMissingToBank(next.exerciseBank || state.exerciseBank, payload.templates[templateId].map(function (e) {
-        return cats[e.name] ? Object.assign({}, e, { category: cats[e.name] }) : e;
+      next.exerciseBank = addMissingToBank(next.exerciseBank || state.exerciseBank, keep.map(function (i) {
+        var cat = cats[incoming[i].name];
+        return cat ? Object.assign({}, resolved[i], { category: cat }) : resolved[i];
       }));
     });
     next.weekPlan = Object.assign({}, state.weekPlan);
@@ -3009,11 +3287,12 @@
   }
 
   function buildExerciseViewModel(exerciseDef, session, exerciseCatalog, readinessVerdict, ownedWeights, isDeloadWeek) {
-    var existing = session && session.exercises ? session.exercises.filter(function (e) { return e.name === exerciseDef.name; })[0] : null;
+    var defId = exerciseIdOf(exerciseDef);
+    var existing = session && session.exercises ? session.exercises.filter(function (e) { return exerciseIdOf(e) === defId; })[0] : null;
     var sets = existing ? existing.sets.slice() : [];
     while (sets.length < exerciseDef.targetSets) sets.push({ reps: null, weight: null, cadenceMs: null });
 
-    var catalogEntry = exerciseCatalog ? exerciseCatalog[exerciseDef.name] : null;
+    var catalogEntry = lookupByExercise(exerciseCatalog, exerciseDef);
     var lastPerf = catalogEntry ? { weight: catalogEntry.lastWeight, reps: catalogEntry.lastReps, targetReps: exerciseDef.targetReps } : null;
     var suggestion = suggestProgression(exerciseDef, lastPerf, readinessVerdict, ownedWeights, catalogEntry ? (catalogEntry.missStreak || 0) : 0, isDeloadWeek);
     var complete = allSetsComplete(sets, exerciseDef.targetSets);
@@ -3072,8 +3351,9 @@
         // A reps-axis PR can be a timed hold (Plank, seconds) rather than
         // literal reps -- look up the exercise's actual metric instead of
         // hardcoding "reps", same as the plateau section below already does.
-        var prUnit = (state.exercises[pr.exercise] && state.exercises[pr.exercise].metric === "seconds") ? "sec" : "reps";
-        lines.push("- " + pr.date + ": " + pr.exercise + (pr.type === "reps" ? " — " + pr.reps + " " + prUnit : " — " + pr.weight + " lb × " + pr.reps + " (est. 1RM " + pr.est1RM + " lb)"));
+        var prEntry = lookupByExercise(state.exercises, pr.exerciseId || pr.exercise);
+        var prUnit = (prEntry && prEntry.metric === "seconds") ? "sec" : "reps";
+        lines.push("- " + pr.date + ": " + exerciseDisplayName(state, pr.exerciseId || pr.exercise) + (pr.type === "reps" ? " — " + pr.reps + " " + prUnit : " — " + pr.weight + " lb × " + pr.reps + " (est. 1RM " + pr.est1RM + " lb)"));
       });
     } else {
       lines.push("- none logged");
@@ -3083,7 +3363,8 @@
     lines.push("## Plateaued exercises (no net progress across the last 3 sessions)");
     if (plateaus.length) {
       plateaus.forEach(function (p) {
-        var unit = p.metric === "weight" ? "lb est. 1RM" : (state.exercises[p.exercise] && state.exercises[p.exercise].metric === "seconds" ? "sec" : "reps");
+        var pEntry = lookupByExercise(state.exercises, p.exerciseId || p.exercise);
+        var unit = p.metric === "weight" ? "lb est. 1RM" : (pEntry && pEntry.metric === "seconds" ? "sec" : "reps");
         lines.push("- " + p.exercise + ": stuck at " + p.value + " " + unit + " as of " + p.lastDate);
       });
     } else {
@@ -3092,7 +3373,7 @@
     lines.push("");
     var digestWeekKey = weekStartKey(now);
     var digestIsDeload = isDeloadWeekActive(state, digestWeekKey);
-    var strugglingExercises = Object.keys(state.exercises || {}).filter(function (name) { return (state.exercises[name].missStreak || 0) >= 2; });
+    var strugglingExercises = Object.keys(state.exercises || {}).filter(function (k) { return (state.exercises[k].missStreak || 0) >= 2; }).map(function (k) { return state.exercises[k].name || k; });
     lines.push("## Deload status");
     lines.push("- This week is " + (digestIsDeload ? "" : "NOT ") + "currently marked a deload week.");
     if (strugglingExercises.length) {
@@ -3230,6 +3511,17 @@
     parsePlanChangePayload: parsePlanChangePayload,
     sanitizeExerciseDef: sanitizeExerciseDef,
     deriveCatalog: deriveCatalog,
+    exerciseIdOf: exerciseIdOf,
+    exerciseSlug: exerciseSlug,
+    normalizeExerciseName: normalizeExerciseName,
+    lookupByExercise: lookupByExercise,
+    knownExercises: knownExercises,
+    resolveExercise: resolveExercise,
+    resolveExerciseDefs: resolveExerciseDefs,
+    exerciseDisplayName: exerciseDisplayName,
+    renameExercise: renameExercise,
+    stampExerciseIds: stampExerciseIds,
+    BUILTIN_BANK_BY_ID: BUILTIN_BANK_BY_ID,
     deriveCatalogEntry: deriveCatalogEntry,
     lastPerfBefore: lastPerfBefore,
     rebuildExerciseCatalog: rebuildExerciseCatalog,
@@ -3820,7 +4112,7 @@
     var plateaus = L.detectPlateaus(state);
     var struggling = Object.keys(state.exercises || {}).filter(function (name) { return (state.exercises[name].missStreak || 0) >= 2; });
     var stalledNames = {};
-    plateaus.forEach(function (p) { stalledNames[p.exercise] = true; });
+    plateaus.forEach(function (p) { stalledNames[p.exerciseId || p.exercise] = true; });
     struggling.forEach(function (name) { stalledNames[name] = true; });
     var stalledCount = Object.keys(stalledNames).length;
     if (stalledCount >= 2) {
@@ -3996,8 +4288,8 @@
   function renderCustomExerciseCards(vm, readinessVerdict, history) {
     var customEx = (vm.todaySession && vm.todaySession.exercises || []).filter(function (e) { return e.isCustom; });
     return customEx.map(function (e) {
-      var def = { name: e.name, metric: e.metric || "reps", loaded: e.loaded !== undefined ? e.loaded : true, targetSets: e.sets.length || 1, targetReps: 0 };
-      var suggestion = L.suggestCustomProgression(history[e.name], readinessVerdict, state.ownedWeights, vm.isDeload);
+      var def = { id: L.exerciseIdOf(e), name: e.name, metric: e.metric || "reps", loaded: e.loaded !== undefined ? e.loaded : true, targetSets: e.sets.length || 1, targetReps: 0 };
+      var suggestion = L.suggestCustomProgression(L.lookupByExercise(history, e), readinessVerdict, state.ownedWeights, vm.isDeload);
       var evm = { def: def, sets: e.sets, suggestion: suggestion, complete: L.allSetsComplete(e.sets, e.sets.length) };
       return renderExerciseCard(evm, true);
     }).join("");
@@ -4005,6 +4297,9 @@
 
   function renderExerciseCard(evm, isCustom) {
     var def = evm.def;
+    // Cards and set rows carry the exercise id; the heading shows its
+    // current name (a past day's snapshot may hold an older one).
+    var exId = L.exerciseIdOf(def);
     var unit = def.metric === "seconds" ? "sec" : "reps";
     var targetLine;
     if (isCustom) {
@@ -4035,8 +4330,8 @@
     var rows = evm.sets.map(function (set, i) {
       var checked = L.isSetFilled(set);
       var cadence = set.cadenceMs ? '<div class="cadence">split: ' + (set.cadenceMs / 1000).toFixed(1) + "s</div>" : "";
-      var running = activeTimers[def.name + "-" + i];
-      return '<div class="set-row" data-exercise="' + esc(def.name) + '" data-set="' + i + '">' +
+      var running = activeTimers[exId + "-" + i];
+      return '<div class="set-row" data-exercise="' + esc(exId) + '" data-set="' + i + '">' +
         '<div class="set-idx">' + (i + 1) + "</div>" +
         '<input type="number" inputmode="decimal" placeholder="' + unit + '" data-field="reps" value="' + (set.reps != null ? set.reps : "") + '">' +
         (def.loaded ? '<input type="number" inputmode="decimal" placeholder="lb" data-field="weight" value="' + (set.weight != null ? set.weight : "") + '">' : '<div></div>') +
@@ -4049,8 +4344,8 @@
     var description = L.resolveExerciseDescription(state, def);
     var descLine = description ? '<div class="desc">' + esc(description) + "</div>" : "";
 
-    return '<div class="exercise-card ' + (evm.complete ? "complete" : "") + '" data-exercise="' + esc(def.name) + '" data-suggested-reps="' + esc(suggestedReps) + '" data-suggested-weight="' + esc(suggestedWeight) + '">' +
-      "<h3>" + esc(def.name) + (isCustom ? ' <span class="faint">custom</span>' : "") + "</h3>" +
+    return '<div class="exercise-card ' + (evm.complete ? "complete" : "") + '" data-exercise="' + esc(exId) + '" data-suggested-reps="' + esc(suggestedReps) + '" data-suggested-weight="' + esc(suggestedWeight) + '">' +
+      "<h3>" + esc(L.exerciseDisplayName(state, def)) + (isCustom ? ' <span class="faint">custom</span>' : "") + "</h3>" +
       '<div class="target">' + targetLine + "</div>" + descLine + rows + "</div>";
   }
 
@@ -4169,22 +4464,23 @@
   // seconds surfaced two of them still saying "reps" after the first was
   // already fixed -- one lookup now, used everywhere reps-axis history is
   // displayed, so it can't drift out of sync again.
-  function repsAxisUnit(name) {
-    var entry = state.exercises[name];
+  function repsAxisUnit(ref) {
+    var entry = L.lookupByExercise(state.exercises, ref);
     return (entry && entry.metric === "seconds") ? "sec" : "reps";
   }
 
   function renderExerciseList() {
     var el = $("#exerciseList");
-    var names = L.listLoggedExercises(state);
-    if (!names.length) { el.innerHTML = '<div class="empty">Log an exercise to see its trend here.</div>'; return; }
-    el.innerHTML = names.map(function (name) {
-      var history = L.buildExerciseHistory(state.sessions, name);
+    var ids = L.listLoggedExercises(state);
+    if (!ids.length) { el.innerHTML = '<div class="empty">Log an exercise to see its trend here.</div>'; return; }
+    el.innerHTML = ids.map(function (id) {
+      var name = L.exerciseDisplayName(state, id);
+      var history = L.buildExerciseHistory(state.sessions, id);
       var values = history.points.map(function (p) { return history.metric === "weight" ? p.est1RM : p.bestReps; });
       var best = values.length ? Math.max.apply(null, values) : 0;
-      var unit = history.metric === "weight" ? "lb e1RM" : repsAxisUnit(name);
+      var unit = history.metric === "weight" ? "lb e1RM" : repsAxisUnit(id);
       var sessionWord = history.points.length === 1 ? "session" : "sessions";
-      return '<div class="exercise-row" data-action="open-exercise-detail" data-exercise="' + esc(name) + '">' +
+      return '<div class="exercise-row" data-action="open-exercise-detail" data-exercise="' + esc(id) + '">' +
         '<span class="name">' + esc(name) + '</span>' +
         '<span class="meta">best ' + best + " " + unit + " · " + history.points.length + " " + sessionWord + '</span></div>';
     }).join("");
@@ -4353,7 +4649,7 @@
   }
 
   function handleSetInput(row, input) {
-    var exerciseName = row.dataset.exercise;
+    var exerciseId = row.dataset.exercise;
     var setIdx = Number(row.dataset.set);
     var field = input.dataset.field;
     if (!field) return;
@@ -4362,10 +4658,10 @@
     var dayLabel = vm.isRest ? "Rest" : vm.template.label;
     var session = findOrCreateSessionForViewedDate(vm, dayLabel);
 
-    var exEntry = session.exercises.find(function (e) { return e.name === exerciseName; });
+    var exEntry = session.exercises.find(function (e) { return L.exerciseIdOf(e) === exerciseId; });
     if (!exEntry) {
-      var def = ((!vm.isRest && vm.template && vm.template.exercises) || []).find(function (d) { return d.name === exerciseName; });
-      exEntry = { name: exerciseName, isCustom: !def, metric: def ? def.metric : "reps", loaded: def ? def.loaded : true, sets: [] };
+      var def = ((!vm.isRest && vm.template && vm.template.exercises) || []).find(function (d) { return L.exerciseIdOf(d) === exerciseId; });
+      exEntry = { id: exerciseId, name: def ? def.name : L.exerciseDisplayName(state, exerciseId), isCustom: !def, metric: def ? def.metric : "reps", loaded: def ? def.loaded : true, sets: [] };
       session.exercises.push(exEntry);
     }
     while (exEntry.sets.length <= setIdx) exEntry.sets.push({ reps: null, weight: null, cadenceMs: null });
@@ -4373,8 +4669,8 @@
     var val = input.value === "" ? null : Number(input.value);
     exEntry.sets[setIdx][field] = val;
 
-    debounce("set-" + exerciseName + "-" + setIdx, function () {
-      maybeAutoCompleteExercise(session, exerciseName);
+    debounce("set-" + exerciseId + "-" + setIdx, function () {
+      maybeAutoCompleteExercise(session, exerciseId);
       syncLongestStreak();
       Store.save(state);
     }, 400);
@@ -4386,7 +4682,7 @@
     debounceTimers[key] = setTimeout(fn, ms);
   }
 
-  function maybeAutoCompleteExercise(session, exerciseName) {
+  function maybeAutoCompleteExercise(session, exerciseId) {
     // Runs after a debounce, so re-derive the day from the session itself
     // (not the outer viewDate) -- viewDate may have moved on to a different
     // day by the time this fires.
@@ -4398,10 +4694,11 @@
     // logged on a rest day must not pick up targets (or a workout-complete
     // bonus) from it.
     var effectiveTemplate = session.templateSnapshot || (vm.isRest ? null : vm.template);
-    var def = effectiveTemplate && effectiveTemplate.exercises ? effectiveTemplate.exercises.find(function (d) { return d.name === exerciseName; }) : null;
-    var exEntry = session.exercises.find(function (e) { return e.name === exerciseName; });
+    var def = effectiveTemplate && effectiveTemplate.exercises ? effectiveTemplate.exercises.find(function (d) { return L.exerciseIdOf(d) === exerciseId; }) : null;
+    var exEntry = session.exercises.find(function (e) { return L.exerciseIdOf(e) === exerciseId; });
     var targetSets = def ? def.targetSets : exEntry.sets.length;
     var nowComplete = L.allSetsComplete(exEntry.sets, targetSets);
+    var displayName = L.exerciseDisplayName(state, exEntry);
 
     // XP (and any PR bonus) for an exercise is awarded once per session,
     // ever -- not once per "just became complete" transition. It used to
@@ -4424,18 +4721,18 @@
       // Compared against the best as it stood BEFORE this session's day --
       // the cache already includes this session, so comparing against it
       // would mean nothing could ever beat it.
-      var prior = L.deriveCatalogEntry(state, exerciseName, { before: session.date });
+      var prior = L.deriveCatalogEntry(state, exerciseId, { before: session.date });
       var prCount = L.countSessionPRs(setsThisExercise, prior);
 
       var xp = setsThisExercise.reduce(function (sum, s) { return sum + L.xpForSet(s, def); }, 0);
       xp += prCount * L.PR_BONUS_XP;
-      awardXp(xp, prCount > 0 ? (def ? def.name : exerciseName) + " • New PR!" : (def ? def.name : exerciseName));
+      awardXp(xp, prCount > 0 ? displayName + " • New PR!" : displayName);
       session.xpEarned = (session.xpEarned || 0) + xp;
       exEntry._xpAwarded = true;
-      refreshCatalogEntry(exerciseName);
+      refreshCatalogEntry(exerciseId);
       checkWorkoutComplete(session, effectiveTemplate);
     } else {
-      refreshCatalogEntry(exerciseName);
+      refreshCatalogEntry(exerciseId);
     }
     exEntry._wasComplete = nowComplete;
 
@@ -4472,10 +4769,10 @@
 
   function patchExerciseCards(session, effectiveTemplate, vm) {
     $all(".exercise-card").forEach(function (card) {
-      var name = card.dataset.exercise;
-      var exEntry = (session.exercises || []).find(function (e) { return e.name === name; });
+      var id = card.dataset.exercise;
+      var exEntry = (session.exercises || []).find(function (e) { return L.exerciseIdOf(e) === id; });
       if (!exEntry) return;
-      var def = effectiveTemplate && effectiveTemplate.exercises ? effectiveTemplate.exercises.find(function (d) { return d.name === name; }) : null;
+      var def = effectiveTemplate && effectiveTemplate.exercises ? effectiveTemplate.exercises.find(function (d) { return L.exerciseIdOf(d) === id; }) : null;
       var targetSets = def ? def.targetSets : exEntry.sets.length;
       exEntry.sets.forEach(function (set, i) {
         var row = card.querySelector('.set-row[data-set="' + i + '"]');
@@ -4491,7 +4788,7 @@
     var dateTagEl = $("#todayDateTag");
     if (dateTagEl && effectiveTemplate && !effectiveTemplate.isCardio) {
       var allDone = effectiveTemplate.exercises.every(function (def) {
-        var e = session.exercises.find(function (x) { return x.name === def.name; });
+        var e = session.exercises.find(function (x) { return L.exerciseIdOf(x) === L.exerciseIdOf(def); });
         return e && L.allSetsComplete(e.sets, def.targetSets);
       });
       var dateTag = isRealToday(vm.dateKey) ? "Today" : formatDateLabel(vm.dateKey);
@@ -4502,7 +4799,7 @@
   function checkWorkoutComplete(session, effectiveTemplate) {
     if (!effectiveTemplate || effectiveTemplate.isCardio) return;
     var allDone = effectiveTemplate.exercises.every(function (def) {
-      var e = session.exercises.find(function (x) { return x.name === def.name; });
+      var e = session.exercises.find(function (x) { return L.exerciseIdOf(x) === L.exerciseIdOf(def); });
       return e && L.allSetsComplete(e.sets, def.targetSets);
     });
     if (allDone && !session._bonusAwarded) {
@@ -4516,11 +4813,11 @@
   // Rebuilds one exercise's cache entry from every session, so editing any
   // day -- not just the newest -- leaves it correct. No filled sets left
   // anywhere means there's nothing to remember.
-  function refreshCatalogEntry(name) {
-    var derived = L.deriveCatalogEntry(state, name);
-    if (!derived) { delete state.exercises[name]; return; }
+  function refreshCatalogEntry(id) {
+    var derived = L.deriveCatalogEntry(state, id);
+    if (!derived) { delete state.exercises[id]; return; }
     derived.updatedAt = new Date().toISOString();
-    state.exercises[name] = derived;
+    state.exercises[id] = derived;
   }
 
   // Tapping the checkmark fills in what was actually prescribed for this
@@ -4559,7 +4856,7 @@
       delete activeTimers[key];
       var vm = L.buildTodayViewModel(state, viewDate);
       var session = findOrCreateSessionForViewedDate(vm, vm.isRest ? "Rest" : vm.template.label);
-      var exEntry = session.exercises.find(function (e) { return e.name === row.dataset.exercise; });
+      var exEntry = session.exercises.find(function (e) { return L.exerciseIdOf(e) === row.dataset.exercise; });
       if (exEntry) {
         var idx = Number(row.dataset.set);
         while (exEntry.sets.length <= idx) exEntry.sets.push({ reps: null, weight: null, cadenceMs: null });
@@ -4731,31 +5028,31 @@
       if (!q) { list.innerHTML = ""; return; }
       // The bank plus anything logged that isn't in it (e.g. removed from
       // the bank but still has history).
-      var pool = Object.keys(state.exerciseBank || {});
-      Object.keys(state.exercises).forEach(function (n) { if (pool.indexOf(n) === -1) pool.push(n); });
-      var names = pool
-        .filter(function (n) { return n.toLowerCase().indexOf(q) !== -1; })
-        .sort()
+      var known = L.knownExercises(state);
+      var ids = Object.keys(known)
+        .filter(function (id) { return known[id].toLowerCase().indexOf(q) !== -1; })
+        .sort(function (a, b) { return known[a].localeCompare(known[b]); })
         .slice(0, 6);
-      if (!names.length) { list.innerHTML = ""; return; }
-      list.innerHTML = names.map(function (name) {
-        var entry = state.exercises[name];
-        var bankEntry = (state.exerciseBank || {})[name];
+      if (!ids.length) { list.innerHTML = ""; return; }
+      list.innerHTML = ids.map(function (id) {
+        var name = known[id];
+        var entry = L.lookupByExercise(state.exercises, id);
+        var bankEntry = L.lookupByExercise(state.exerciseBank, id);
         var meta = !entry ? L.formatExerciseTarget(bankEntry)
           : entry.loaded
           ? (entry.lastWeight || 0) + " lb last time"
           : (entry.lastReps || 0) + (entry.metric === "seconds" ? " sec" : " reps") + " last time";
-        return '<div class="suggestion-item" data-action="pick-custom-suggestion" data-exercise="' + esc(name) + '">' +
+        return '<div class="suggestion-item" data-action="pick-custom-suggestion" data-exercise="' + esc(id) + '">' +
           "<span>" + esc(name) + '</span><span class="faint">' + esc(meta) + "</span></div>";
       }).join("");
     });
   }
 
   function pickCustomSuggestion(el) {
-    var name = el.dataset.exercise;
-    var entry = state.exercises[name];
-    var bankEntry = (state.exerciseBank || {})[name];
-    $("#customName").value = name;
+    var id = el.dataset.exercise;
+    var entry = L.lookupByExercise(state.exercises, id);
+    var bankEntry = L.lookupByExercise(state.exerciseBank, id);
+    $("#customName").value = L.knownExercises(state)[id] || L.exerciseDisplayName(state, id);
     $("#customSuggestions").innerHTML = "";
     if (!entry && bankEntry) {
       setFselectValue("customMetric", bankEntry.metric, METRIC_OPTIONS);
@@ -4769,23 +5066,26 @@
   }
 
   function addCustomExercise() {
-    var name = $("#customName").value.trim();
+    var typed = $("#customName").value.trim();
     var numSets = Math.max(1, Number($("#customSets").value) || 3);
     var metric = fselectValue("customMetric") === "seconds" ? "seconds" : "reps";
     var loaded = $("#customLoaded").checked;
-    if (!name) return;
+    if (!typed) return;
+    // "push ups" is the Push-Up you already have, history and all.
+    var match = L.resolveExercise(state, typed);
+    var id = match.id, name = match.name;
     var vm = L.buildTodayViewModel(state, viewDate);
     var dayLabel = vm.isRest ? "Rest" : (vm.template ? vm.template.label : "Workout");
     var session = findOrCreateSessionForViewedDate(vm, dayLabel);
-    var existing = session.exercises.find(function (e) { return e.name === name; });
+    var existing = session.exercises.find(function (e) { return L.exerciseIdOf(e) === id; });
     if (!existing) {
       var sets = [];
       for (var i = 0; i < numSets; i++) sets.push({ reps: null, weight: null, cadenceMs: null });
-      session.exercises.push({ name: name, isCustom: true, metric: metric, loaded: loaded, sets: sets });
+      session.exercises.push({ id: id, name: name, isCustom: true, metric: metric, loaded: loaded, sets: sets });
     }
     // A brand-new one-off lands in the bank too (uncategorized unless the
     // built-in list knows it) so it can be picked for a workout later.
-    state.exerciseBank = L.addMissingToBank(state.exerciseBank, [{ name: name, metric: metric, loaded: loaded, targetSets: numSets, targetReps: 10 }]);
+    state.exerciseBank = L.addMissingToBank(state.exerciseBank, [{ id: id, name: name, metric: metric, loaded: loaded, targetSets: numSets, targetReps: 10 }]);
     Store.save(state);
     closeModal();
     render();
@@ -4993,6 +5293,7 @@
       rowEl.querySelectorAll("[data-field]").forEach(function (fieldEl) {
         fieldEl.addEventListener("change", function () {
           var field = fieldEl.dataset.field;
+          if (field === "name") return renameFromTemplateEditor(index, fieldEl.value);
           var value;
           if (field === "loaded") value = fieldEl.checked;
           // Floor at 1, not 0: allSetsComplete(sets, 0) trivially returns true
@@ -5010,6 +5311,18 @@
         updatePlanTemplate(function (t) { return L.updateExerciseInTemplate(t, index, { metric: value }); });
       });
     });
+  }
+
+  // Renames the exercise itself (bank, every workout, progress), keeping its
+  // history. Swapping in a different exercise is remove + "+ Add Exercise".
+  function renameFromTemplateEditor(index, value) {
+    var def = L.getTemplates(state)[planEditorTemplateId].exercises[index];
+    if (!def || value.trim() === def.name) return;
+    var result = L.renameExercise(state, L.exerciseIdOf(def), value);
+    if (result.error) { alert(result.error); renderTemplateEditor(); return; }
+    state = result.state;
+    Store.save(state);
+    render();
   }
 
   function updatePlanTemplate(mutator) {
@@ -5053,19 +5366,19 @@
 
   // "Uncategorized" is a filter-only pseudo-category for entries with no
   // category yet (e.g. an exercise first logged as a one-off custom).
-  function filterBank(filter, excludeNames) {
+  function filterBank(filter, excludeIds) {
     var realCats = filter.cats.filter(function (c) { return c !== "Uncategorized"; });
     var wantUncat = filter.cats.indexOf("Uncategorized") !== -1;
     var all = L.filterExerciseBank(state.exerciseBank, filter.query, []);
     return all.filter(function (e) {
-      if (excludeNames && excludeNames.indexOf(e.name) !== -1) return false;
+      if (excludeIds && excludeIds.indexOf(L.exerciseIdOf(e)) !== -1) return false;
       if (!filter.cats.length) return true;
       return (e.category && realCats.indexOf(e.category) !== -1) || (!e.category && wantUncat);
     });
   }
 
   function bankRowHtml(entry, action) {
-    return '<div class="suggestion-item" data-action="' + action + '" data-exercise="' + esc(entry.name) + '">' +
+    return '<div class="suggestion-item" data-action="' + action + '" data-exercise="' + esc(L.exerciseIdOf(entry)) + '">' +
       "<span>" + esc(entry.name) + '</span><span class="faint">' + esc(L.formatExerciseTarget(entry) + (entry.loaded ? "" : ", bodyweight") + " · " + (entry.category || "Uncategorized")) + "</span></div>";
   }
 
@@ -5113,10 +5426,10 @@
 
   function renderPickerList() {
     var template = L.getTemplates(state)[planEditorTemplateId];
-    var inWorkout = (template.exercises || []).map(function (e) { return e.name; });
+    var inWorkout = (template.exercises || []).map(function (e) { return L.exerciseIdOf(e); });
     var rows = filterBank(pickerFilter, inWorkout);
     var q = pickerFilter.query.trim();
-    var exact = q && Object.keys(state.exerciseBank || {}).some(function (n) { return n.toLowerCase() === q.toLowerCase(); });
+    var exact = q && !L.resolveExercise(state, q).isNew;
     var html = rows.map(function (e) { return bankRowHtml(e, "picker-pick"); }).join("");
     if (q && !exact) {
       html += '<div class="suggestion-item" data-action="picker-create"><span>+ Create “' + esc(q) + '”</span><span class="faint">new exercise</span></div>';
@@ -5125,23 +5438,24 @@
     $("#pickerList").innerHTML = html;
   }
 
-  function pickFromBank(name) {
-    var entry = (state.exerciseBank || {})[name];
+  function pickFromBank(id) {
+    var entry = L.lookupByExercise(state.exerciseBank, id);
     if (!entry) return;
     updatePlanTemplate(function (t) { return L.addExerciseToTemplate(t, L.bankEntryToTemplateDef(entry)); });
     closeModal();
   }
 
-  function openBankForm(mode, name, addToWorkout) {
-    var entry = mode === "edit" ? state.exerciseBank[name] : null;
+  // mode "edit": ref is the exercise id. mode "new": ref is a typed name.
+  function openBankForm(mode, ref, addToWorkout) {
+    var entry = mode === "edit" ? L.lookupByExercise(state.exerciseBank, ref) : null;
     var builtin = null;
-    L.DEFAULT_EXERCISE_BANK.forEach(function (b) { if (!entry && b.name.toLowerCase() === String(name || "").toLowerCase()) builtin = b; });
-    var base = entry || builtin || { name: name || "", category: null, metric: "reps", loaded: true, targetSets: 3, targetReps: 10 };
-    bankForm = { mode: mode, name: base.name, category: base.category || null, addToWorkout: !!addToWorkout };
+    L.DEFAULT_EXERCISE_BANK.forEach(function (b) { if (!entry && b.name.toLowerCase() === String(ref || "").toLowerCase()) builtin = b; });
+    var base = entry || builtin || { name: ref || "", category: null, metric: "reps", loaded: true, targetSets: 3, targetReps: 10 };
+    bankForm = { mode: mode, id: entry ? L.exerciseIdOf(entry) : null, name: base.name, category: base.category || null, addToWorkout: !!addToWorkout };
     var body =
       '<div class="modal-grip"></div>' +
       '<div class="modal-head"><h2>' + (mode === "edit" ? esc(base.name) : "New Exercise") + '</h2><button class="icon-btn" data-action="close-modal">✕</button></div>' +
-      (mode === "edit" ? "" : '<label class="field-label">Name</label><input type="text" id="bankName" autocomplete="off" value="' + esc(base.name) + '">') +
+      '<label class="field-label">Name' + (mode === "edit" ? " (renaming keeps its history)" : "") + '</label><input type="text" id="bankName" autocomplete="off" value="' + esc(base.name) + '">' +
       '<label class="field-label" style="margin-top:8px;">Category</label>' +
       '<div class="cat-chips" id="bankFormChips"></div>' +
       '<label class="field-label" style="margin-top:8px;">Description (optional — shown on the Today card)</label>' +
@@ -5170,15 +5484,31 @@
   }
 
   function saveBankForm() {
-    var name = bankForm.mode === "edit" ? bankForm.name : $("#bankName").value.trim();
+    var name = $("#bankName").value.trim();
     var errorEl = $("#bankFormError");
     var showError = function (msg) { errorEl.innerHTML = '<div class="banner danger" style="margin-top:10px;">' + esc(msg) + "</div>"; };
     if (!name) return showError("Give the exercise a name.");
     if (!bankForm.category) return showError("Pick a category.");
-    if (bankForm.mode === "new" && Object.keys(state.exerciseBank || {}).some(function (n) { return n.toLowerCase() === name.toLowerCase(); })) {
-      return showError("“" + name + "” is already in the bank.");
+    var id;
+    if (bankForm.mode === "new") {
+      // Loose match: "push ups" is the Push-Up that already exists. One
+      // that has history but was taken out of the bank can be added back.
+      var match = L.resolveExercise(state, name);
+      if (!match.isNew && L.lookupByExercise(state.exerciseBank, match.id)) return showError("“" + match.name + "” is already in the bank.");
+      id = match.id;
+      if (!match.isNew) name = match.name;
+    } else {
+      id = bankForm.id;
+      var current = L.lookupByExercise(state.exerciseBank, id);
+      if (current && current.name !== name) {
+        var renamed = L.renameExercise(state, id, name);
+        if (renamed.error) return showError(renamed.error);
+        state = renamed.state;
+        name = L.exerciseDisplayName(state, id);
+      }
     }
     var result = L.upsertBankEntry(state.exerciseBank, {
+      id: id,
       name: name,
       category: bankForm.category,
       metric: fselectValue("bankMetric") === "seconds" ? "seconds" : "reps",
@@ -5196,17 +5526,17 @@
     bankForm = null;
     closeModal();
     Store.save(state);
-    renderTemplateEditor();
-    renderBankPanel();
+    // A full render: a rename shows on Today and Progress too, not only here.
+    render();
   }
 
   // Removing a bank entry only takes it out of the picker -- workouts that
   // already include it keep their copy, and its logged history is untouched.
   function deleteBankEntryFlow() {
     var name = bankForm && bankForm.name;
-    if (!name) return;
+    if (!name || !bankForm.id) return;
     if (!confirm("Remove “" + name + "” from the exercise bank? Workouts that already include it keep it, and its history stays.")) return;
-    state.exerciseBank = L.removeBankEntry(state.exerciseBank, name);
+    state.exerciseBank = L.removeBankEntry(state.exerciseBank, bankForm.id);
     bankForm = null;
     closeModal();
     Store.save(state);
@@ -5719,9 +6049,10 @@
   }
 
   /* ---------- exercise history (progress trend) ---------- */
-  function openExerciseDetailModal(name) {
-    var history = L.buildExerciseHistory(state.sessions, name);
-    var unit = history.metric === "weight" ? "lb e1RM" : repsAxisUnit(name);
+  function openExerciseDetailModal(id) {
+    var name = L.exerciseDisplayName(state, id);
+    var history = L.buildExerciseHistory(state.sessions, id);
+    var unit = history.metric === "weight" ? "lb e1RM" : repsAxisUnit(id);
     // Weighted exercises plot estimated one-rep max, not raw weight -- a
     // rep increase at the same weight (30lb x8 -> 30lb x12) is real
     // progress and needs to show as a rising line, not a flat one.
