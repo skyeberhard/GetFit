@@ -53,7 +53,8 @@ The positioning is a hypothesis, not a launch plan. Before any payment or sync w
 ```
 app/         the actual PWA: index.html (the whole app), manifest.json,
              service-worker.js, icons/ -- no build step
-docs/        roadmap, execution plan, architecture notes
+docs/        overview (feature and architecture history), roadmap,
+             execution plan
 scripts/     test harness and CI helper scripts
 exports/     local data exports (gitignored, never committed)
 ```
