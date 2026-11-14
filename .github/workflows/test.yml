@@ -15,10 +15,34 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The app is date-heavy and a developer's machine is rarely UTC, so the
+    # harness runs under several zones to catch tests (or logic) that only
+    # work in one.
+    strategy:
+      fail-fast: false
+      matrix:
+        tz: ["UTC", "America/Chicago", "Pacific/Auckland"]
+    env:
+      TZ: ${{ matrix.tz }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Run test harness
+      - name: Run test harness (${{ matrix.tz }})
         run: node scripts/test-harness.js
+
+  cache-bump:
+    # A PR that changes app/ must bump CACHE_NAME, or installed copies keep
+    # serving the old cached shell.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Require a CACHE_NAME bump when app/ changes
+        run: node scripts/check-cache-bump.js "origin/${{ github.base_ref }}"

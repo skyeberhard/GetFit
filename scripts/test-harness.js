@@ -114,8 +114,11 @@ async function main() {
 
   const richReadiness = {};
   for (let i = 1; i <= 10; i++) {
-    const d = new Date(now2609); d.setDate(d.getDate() - i);
-    richReadiness[L.toDateKey(d)] = { restingHR: 50, sleepScore: 80 };
+    // UTC arithmetic on purpose: computeRollingBaselines parses keys as UTC
+    // midnight, so building them from local dates made this check pass only
+    // when the machine's timezone happened to be UTC.
+    const key = new Date(now2609.getTime() - i * 86400000).toISOString().slice(0, 10);
+    richReadiness[key] = { restingHR: 50, sleepScore: 80 };
   }
   const richRolling = L.computeRollingBaselines(richReadiness, now2609, 30);
   check("computeRollingBaselines averages resting HR once the sample floor is met", richRolling.restingHR === 50);
