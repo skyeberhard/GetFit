@@ -80,6 +80,8 @@
 
 - [x] **Exercise descriptions.** Every built-in bank exercise now carries a short, plain-language how-to-do-it cue (`description`, capped at 160 chars, sanitized the same way as everything else in a bank entry). It's copied into a template's exercise def when picked from the bank (`bankEntryToTemplateDef`), and shown as a muted line under the target on each Today exercise card (`resolveExerciseDescription`) — falling back from the exercise's own copy to the account's current bank entry to the built-in default, so it also shows up for exercises that were added to a plan before this feature existed, or that came in through a starter plan (which builds templates directly rather than through the picker). The Exercise Bank editor gained a description field so a custom exercise can get one too.
 
+- [x] **CI hardening (PR-0 of [docs/execution-plan.md](execution-plan.md)).** The harness now runs under UTC, America/Chicago and Pacific/Auckland in CI. That caught a real portability bug: one `computeRollingBaselines` check built its dates in local time but the function parses keys as UTC, so it passed only on a UTC machine (CI) and failed everywhere else. Also added `scripts/check-cache-bump.js`, run on every PR, which fails when anything under `app/` changes without a new `CACHE_NAME` in the service worker (otherwise installed copies keep serving the old shell). The Validation notes below were corrected to v8.
+
 ## Explicitly deferred (flagged as scope creep for this app)
 
 - Reading / Scripture memorization tracking — a different habit domain from fitness; revisit as a separate tool or a genuinely thin, isolated tab if still wanted later.
@@ -92,5 +94,5 @@
 
 - `node --check` runs against every inline `<script>` block via `scripts/test-harness.js`
 - The pure logic/view-model layer (`TrainLogic`, embedded in `app/index.html`) is dual-exported (CommonJS in Node, `window` in browser) so the harness can unit-test readiness scoring (including its effect on progression) and rolling-baseline calculation, rep-range/owned-weight progression suggestions, deload-week and miss-streak failure handling, estimated-1RM PR/plateau detection, XP/leveling, streaks (current and the historical-peak scan), consistency, attributes, plan-change parse/diff/apply, rest-day validation, template editing (including adding/removing whole templates, not just exercises within one), template-snapshot compliance, swap-vs-rest-day interaction, import-payload validation, the backup-reminder day-count helper, and schema migration without a browser
-- Schema migration is tested as a chain: reconstructed v0 (legacy) → v1 → v2 → v3 → v4 → v5 → v6 → current (v7), per the "test migrations against real saved data" principle
+- Schema migration is tested as a chain: reconstructed v0 (legacy) → v1 → v2 → v3 → v4 → v5 → v6 → v7 → current (v8), per the "test migrations against real saved data" principle
 - Run `node scripts/test-harness.js` before considering any change to `app/index.html` done
